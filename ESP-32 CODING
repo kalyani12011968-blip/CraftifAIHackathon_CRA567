@@ -1,0 +1,2645 @@
+* ============================================================
+                  JAL-RAKSHAK
+        Water Monitoring & Alert System
+   ============================================================
+
+   HARDWARE (per latest wiring sheet):
+   ESP32-WROOM-32
+   HC-SR04 Ultrasonic Sensor      (TRIG: GPIO18, ECHO: GPIO19 via voltage divider)
+   LM35 Temperature Sensor        (GPIO34, ADC)
+   Raindrop Sensor Module         (AO: GPIO35, ADC)
+   Vibration Sensor (SW-420)      (DO: GPIO27)
+   Buzzer Module                  (IN/S: GPIO25)
+   I2C 16x2 LCD                   (SDA: GPIO21, SCL: GPIO22)
+   SIM800L GSM Module             (RX2: GPIO16, TX2: GPIO17)
+   XL4015 Power Module            (regulated 5V -> ESP32 VIN, ~4.0V -> SIM800L)
+
+   FUNCTIONS:
+   1. Read water distance
+   2. Calculate water level
+   3. Read temperature
+   4. Read rain sensor
+   5. Read vibration sensor
+   6. Calculate water-level rate
+   7. Calculate risk score
+   8. Display data + alerts on LCD
+   9. Sound buzzer alarm on HIGH/CRITICAL risk
+   10. Print data on Serial Monitor
+   11. Send data to ThingSpeak using Wi-Fi
+   12. Send SMS through SIM800L
+   13. Serve a live dashboard page on the ESP32's own IP address
+*/
+
+
+// ============================================================
+// LIBRARIES
+// ============================================================
+
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <HardwareSerial.h>
+#include <WebServer.h>
+
+
+// ============================================================
+// WIFI SETTINGS
+// ============================================================
+const char* WIFI_SSID = "OnePlus Nord 5";
+const char* WIFI_PASSWORD = "Bala@1234";
+
+// ============================================================
+// THINGSPEAK SETTINGS
+// ============================================================
+// This must be your ThingSpeak channel's WRITE API KEY
+// (a short alphanumeric string from ThingSpeak -> Channel ->
+// API Keys -> Write API Key), NOT a URL.
+
+const char* THINGSPEAK_API_KEY = "YOUR_THINGSPEAK_WRITE_API_KEY";
+
+
+// ============================================================
+// JAL-RAKSHAK BACKEND SETTINGS
+// ============================================================
+
+const char* BACKEND_URL = "http://10.93.146.161:5000/api/sensors";
+
+
+// ============================================================
+// PHONE NUMBER
+// ============================================================
+
+String phoneNumber = "+919025087407";
+
+
+// ============================================================
+// PIN DEFINITIONS  (matches latest wiring sheet)
+// ============================================================
+
+// HC-SR04
+const int TRIG_PIN = 18;
+const int ECHO_PIN = 19;   // through 1k/2k voltage divider to 3.3V logic
+
+// LM35
+const int LM35_PIN = 34;
+
+// Rain sensor (analog only per wiring sheet — no digital pin used)
+const int RAIN_AO = 35;
+
+// Vibration sensor (SW-420)
+const int VIBRATION_PIN = 27;
+
+// Buzzer
+const int BUZZER_PIN = 25;
+
+// I2C LCD
+const int SDA_PIN = 21;
+const int SCL_PIN = 22;
+
+// SIM800L
+const int SIM_RX = 16;   // ESP32 RX <- SIM800L TX
+const int SIM_TX = 17;   // ESP32 TX -> SIM800L RX
+
+
+// ============================================================
+// LCD, SIM800L, WEB SERVER
+// ============================================================
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);   // change address to 0x3F if display stays blank
+
+HardwareSerial sim800(1);
+
+WebServer server(80);
+
+
+// ============================================================
+// WATER LEVEL SETTINGS
+// ============================================================
+
+// Distance from HC-SR04 sensor to the bottom of the tank/channel.
+// CHANGE THIS VALUE according to your actual setup.
+
+const float WATER_REFERENCE_HEIGHT = 200.0;
+
+// HC-SR04 operating limits
+const float MIN_DISTANCE = 2.0;
+const float MAX_DISTANCE = 200.0;
+
+
+// ============================================================
+// RISK SETTINGS
+// ============================================================
+
+const float HIGH_RISK = 70.0;
+const float CRITICAL_RISK = 85.0;
+
+
+// ============================================================
+// BUZZER TIMING
+// ============================================================
+
+const unsigned long BUZZER_BEEP_INTERVAL = 500;   // ms between on/off toggles
+
+
+// ============================================================
+// VARIABLES
+// ============================================================
+
+// Ultrasonic
+float distanceCM = 0.0;
+bool sensorError = false;   // flags an HC-SR04 timeout/no-echo reading
+
+// Water
+float waterLevel = 0.0;
+float previousWaterLevel = 0.0;
+
+// Water behavior
+float rateOfChange = 0.0;
+
+// Temperature
+float temperatureC = 0.0;
+
+// Rain
+int rainAnalog = 0;
+bool rainDetected = false;
+
+// Vibration
+bool vibrationDetected = false;
+
+// Risk
+float riskScore = 0.0;
+String riskStatus = "LOW";
+
+// LCD alert flashing
+bool showAlertScreen = false;
+
+// Buzzer state
+bool buzzerOn = false;
+unsigned long lastBuzzerToggle = 0;
+
+
+// ============================================================
+// TIMING
+// ============================================================
+
+unsigned long previousTime = 0;
+
+unsigned long lastThingSpeakUpdate = 0;
+unsigned long lastBackendUpdate = 0;
+unsigned long lastSMS = 0;
+
+const unsigned long SENSOR_INTERVAL = 3000;
+const unsigned long THINGSPEAK_INTERVAL = 15000;
+const unsigned long BACKEND_INTERVAL = 5000;
+const unsigned long SMS_COOLDOWN = 60000;
+
+
+// ============================================================
+// READ HC-SR04
+// ============================================================
+
+float readDistance()
+{
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+
+  if (duration == 0)
+  {
+    // no echo received -> treat as a sensor error instead
+    // of silently reporting an empty tank.
+    sensorError = true;
+    return MAX_DISTANCE;
+  }
+
+  sensorError = false;
+
+  float distance = duration * 0.0343 / 2.0;
+
+  if (distance < MIN_DISTANCE)
+  {
+    distance = MIN_DISTANCE;
+  }
+
+  if (distance > MAX_DISTANCE)
+  {
+    distance = MAX_DISTANCE;
+  }
+
+  return distance;
+}
+
+
+// ============================================================
+// CALCULATE WATER LEVEL
+// ============================================================
+
+float calculateWaterLevel(float distance)
+{
+  float level = WATER_REFERENCE_HEIGHT - distance;
+
+  if (level < 0)
+  {
+    level = 0;
+  }
+
+  if (level > WATER_REFERENCE_HEIGHT)
+  {
+    level = WATER_REFERENCE_HEIGHT;
+  }
+
+  return level;
+}
+
+
+// ============================================================
+// READ LM35
+// ============================================================
+
+float readTemperature()
+{
+  int adcValue = analogRead(LM35_PIN);
+
+  /*
+     ESP32 ADC reference is approximately 3.3 V.
+
+     LM35:
+     10 mV = 1 degree Celsius
+
+     Temperature:
+     Voltage x 100
+  */
+
+  float voltage = (adcValue / 4095.0) * 3.3;
+
+  float tempC = voltage * 100.0;
+
+  return tempC;
+}
+
+
+// ============================================================
+// READ RAIN SENSOR
+// ============================================================
+
+void readRainSensor()
+{
+  rainAnalog = analogRead(RAIN_AO);
+
+  /*
+     Analog-only reading: lower value generally means MORE
+     water on the sensor plate (wetter = more conductive).
+     Tune RAIN_THRESHOLD to your specific module/board.
+  */
+
+  const int RAIN_THRESHOLD = 2500;
+
+  rainDetected = (rainAnalog < RAIN_THRESHOLD);
+}
+
+
+// ============================================================
+// READ VIBRATION SENSOR (SW-420)
+// ============================================================
+
+void readVibrationSensor()
+{
+  /*
+     SW-420 digital output: most boards output HIGH briefly
+     when vibration/shock exceeds the threshold set by the
+     onboard potentiometer. If your module behaves inverted,
+     flip this comparison.
+  */
+
+  vibrationDetected = (digitalRead(VIBRATION_PIN) == HIGH);
+}
+
+
+// ============================================================
+// CALCULATE WATER RATE
+// ============================================================
+
+void calculateWaterRate(float currentLevel, float dt)
+{
+  if (dt <= 0)
+  {
+    rateOfChange = 0;
+    return;
+  }
+
+  rateOfChange =
+      (currentLevel - previousWaterLevel) / dt;
+}
+
+
+// ============================================================
+// CALCULATE RISK SCORE
+// ============================================================
+
+float calculateRisk()
+{
+  /*
+     Risk factors:
+
+     Water level       = 40%
+     Rate of change    = 25%
+     Temperature       = 10%
+     Rainfall          = 25%
+
+     Vibration is reported separately (LCD/Serial/dashboard/
+     backend) but does not currently feed into this score.
+     Ask if you'd like it folded in with its own weight.
+
+     This is a PROJECT RISK INDEX,
+     not a scientifically calibrated flood probability.
+  */
+
+
+  // ----------------------------------------------------------
+  // WATER LEVEL SCORE
+  // ----------------------------------------------------------
+
+  float levelScore =
+      (waterLevel / WATER_REFERENCE_HEIGHT) * 100.0;
+
+  levelScore =
+      constrain(levelScore, 0.0, 100.0);
+
+
+  // ----------------------------------------------------------
+  // WATER RISE RATE SCORE
+  // ----------------------------------------------------------
+
+  float risingRate = rateOfChange;
+
+  if (risingRate < 0)
+  {
+    risingRate = 0;
+  }
+
+  // 2 cm/sec or more = maximum rate score
+
+  float rateScore =
+      (risingRate / 2.0) * 100.0;
+
+  rateScore =
+      constrain(rateScore, 0.0, 100.0);
+
+
+  // ----------------------------------------------------------
+  // RAIN SCORE
+  // ----------------------------------------------------------
+
+  float rainScore = 0;
+
+  if (rainDetected)
+  {
+    rainScore = 100;
+  }
+
+
+  // ----------------------------------------------------------
+  // TEMPERATURE SCORE
+  // ----------------------------------------------------------
+
+  /*
+     Temperature is included as a supporting environmental
+     factor, not as the main flood indicator.
+
+     Example:
+     20C or lower -> low contribution
+     40C or higher -> maximum contribution
+  */
+
+  float temperatureScore =
+      ((temperatureC - 20.0) / 20.0) * 100.0;
+
+  temperatureScore =
+      constrain(temperatureScore, 0.0, 100.0);
+
+
+  // ----------------------------------------------------------
+  // FINAL RISK SCORE
+  // ----------------------------------------------------------
+
+  float score =
+      (levelScore * 0.40) +
+      (rateScore * 0.25) +
+      (temperatureScore * 0.10) +
+      (rainScore * 0.25);
+
+  score =
+      constrain(score, 0.0, 100.0);
+
+  return score;
+}
+
+
+// ============================================================
+// GET RISK STATUS
+// ============================================================
+
+String getRiskStatus(float score)
+{
+  if (score >= CRITICAL_RISK)
+  {
+    return "CRITICAL";
+  }
+  else if (score >= HIGH_RISK)
+  {
+    return "HIGH";
+  }
+  else if (score >= 40)
+  {
+    return "MEDIUM";
+  }
+  else
+  {
+    return "LOW";
+  }
+}
+
+
+// ============================================================
+// LCD DISPLAY
+// ============================================================
+
+void displayLCD()
+{
+  lcd.clear();
+
+  // surface sensor faults on the LCD instead of showing
+  // a misleading "0 cm / LOW risk" reading.
+  if (sensorError)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("Sensor Error!");
+
+    lcd.setCursor(0, 1);
+    lcd.print("Check HC-SR04");
+
+    return;
+  }
+
+  bool alertActive =
+      (riskStatus == "HIGH" || riskStatus == "CRITICAL");
+
+  // ----------------------------------------------------------
+  // ALERT SCREEN (only shown when risk is HIGH or CRITICAL,
+  // alternating with the normal readings screen every refresh
+  // so the alert flashes and stays noticeable).
+  // ----------------------------------------------------------
+
+  if (alertActive && showAlertScreen)
+  {
+    lcd.setCursor(0, 0);
+
+    if (riskStatus == "CRITICAL")
+    {
+      lcd.print("!! CRITICAL !!");
+    }
+    else
+    {
+      lcd.print("!!  ALERT  !!");
+    }
+
+    lcd.setCursor(0, 1);
+    lcd.print("Water:");
+    lcd.print(waterLevel, 0);
+    lcd.print("cm R:");
+    lcd.print(riskScore, 0);
+  }
+  else
+  {
+    // --------------------------------------------------------
+    // NORMAL READINGS SCREEN
+    // --------------------------------------------------------
+
+    lcd.setCursor(0, 0);
+    lcd.print("L:");
+    lcd.print(waterLevel, 0);
+    lcd.print("cm ");
+
+    lcd.print("T:");
+    lcd.print(temperatureC, 1);
+
+    lcd.setCursor(0, 1);
+
+    if (alertActive)
+    {
+      // Still flag the alert even on the readings screen,
+      // so it's visible on every refresh, not just every other one.
+      lcd.print("ALERT! ");
+      lcd.print(riskScore, 0);
+    }
+    else
+    {
+      lcd.print("Risk:");
+      lcd.print(riskScore, 0);
+      lcd.print(" ");
+      lcd.print(riskStatus);
+    }
+  }
+
+  // Flip the flag so the next refresh shows the other screen.
+  showAlertScreen = !showAlertScreen;
+}
+
+
+// ============================================================
+// BUZZER ALARM
+// ============================================================
+// Non-blocking beeping: toggles the buzzer on/off every
+// BUZZER_BEEP_INTERVAL while risk is HIGH/CRITICAL, and stays
+// silent otherwise. Called every loop() iteration so it never
+// blocks sensor reads, LCD updates, or web requests.
+
+void updateBuzzer()
+{
+  bool alertActive =
+      (riskStatus == "HIGH" || riskStatus == "CRITICAL");
+
+  if (!alertActive)
+  {
+    if (buzzerOn)
+    {
+      digitalWrite(BUZZER_PIN, LOW);
+      buzzerOn = false;
+    }
+    return;
+  }
+
+  unsigned long now = millis();
+
+  if (now - lastBuzzerToggle >= BUZZER_BEEP_INTERVAL)
+  {
+    lastBuzzerToggle = now;
+    buzzerOn = !buzzerOn;
+    digitalWrite(BUZZER_PIN, buzzerOn ? HIGH : LOW);
+  }
+}
+
+
+// ============================================================
+// SERIAL MONITOR
+// ============================================================
+
+void printSerial()
+{
+  Serial.println();
+  Serial.println("======================================");
+  Serial.println("          JAL-RAKSHAK DATA");
+  Serial.println("======================================");
+
+  if (sensorError)
+  {
+    Serial.println("WARNING: HC-SR04 timeout / no echo received.");
+    Serial.println("Water level reading may be invalid.");
+  }
+
+  Serial.print("Distance       : ");
+  Serial.print(distanceCM, 2);
+  Serial.println(" cm");
+
+  Serial.print("Water Level    : ");
+  Serial.print(waterLevel, 2);
+  Serial.println(" cm");
+
+  Serial.print("Temperature    : ");
+  Serial.print(temperatureC, 2);
+  Serial.println(" C");
+
+  Serial.print("Rain Analog    : ");
+  Serial.println(rainAnalog);
+
+  Serial.print("Rain Status    : ");
+  Serial.println(rainDetected ? "RAIN DETECTED" : "NO RAIN");
+
+  Serial.print("Vibration      : ");
+  Serial.println(vibrationDetected ? "DETECTED" : "NONE");
+
+  Serial.print("Water Rate     : ");
+  Serial.print(rateOfChange, 3);
+  Serial.println(" cm/s");
+
+  Serial.print("Risk Score     : ");
+  Serial.print(riskScore, 0);
+  Serial.println("/100");
+
+  Serial.print("Risk Status    : ");
+  Serial.println(riskStatus);
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    Serial.print("Dashboard      : http://");
+    Serial.println(WiFi.localIP());
+  }
+
+  Serial.println("======================================");
+}
+
+
+// ============================================================
+// SEND SMS
+// ============================================================
+
+void sendSMS(String message)
+{
+  Serial.println("Sending SMS...");
+
+  sim800.println("AT+CMGF=1");
+
+  delay(1000);
+
+  sim800.print("AT+CMGS=\"");
+  sim800.print(phoneNumber);
+  sim800.println("\"");
+
+  delay(1000);
+
+  sim800.print(message);
+
+  delay(500);
+
+  // CTRL + Z
+  sim800.write(26);
+
+  delay(5000);
+
+  Serial.println("SMS sent.");
+}
+
+
+// ============================================================
+// CHECK SMS ALERT
+// ============================================================
+
+void checkSMSAlert()
+{
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - lastSMS < SMS_COOLDOWN)
+  {
+    return;
+  }
+
+  if (riskScore >= HIGH_RISK)
+  {
+    String message = "";
+
+    message += "JAL-RAKSHAK ALERT!\n";
+
+    message += "Status: ";
+    message += riskStatus;
+
+    message += "\nRisk: ";
+    message += String(riskScore, 0);
+    message += "/100";
+
+    message += "\nWater: ";
+    message += String(waterLevel, 1);
+    message += " cm";
+
+    message += "\nTemp: ";
+    message += String(temperatureC, 1);
+    message += " C";
+
+    message += "\nRate: ";
+    message += String(rateOfChange, 2);
+    message += " cm/s";
+
+    message += "\nRain: ";
+    message += rainDetected ? "YES" : "NO";
+
+    message += "\nVibration: ";
+    message += vibrationDetected ? "YES" : "NO";
+
+    sendSMS(message);
+
+    lastSMS = currentMillis;
+  }
+}
+
+
+// ============================================================
+// CONNECT TO WIFI
+// ============================================================
+
+void connectWiFi()
+{
+  Serial.println();
+  Serial.println("Connecting to Wi-Fi...");
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  int attempts = 0;
+
+  while (WiFi.status() != WL_CONNECTED &&
+         attempts < 20)
+  {
+    delay(500);
+
+    Serial.print(".");
+
+    attempts++;
+  }
+
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    Serial.println("Wi-Fi connected.");
+
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+  }
+  else
+  {
+    Serial.println("Wi-Fi connection failed.");
+  }
+}
+
+
+// ============================================================
+// SEND DATA TO JAL RAKSHAK BACKEND
+// ============================================================
+
+void sendToBackend()
+{
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println("Backend: Wi-Fi not connected.");
+    return;
+  }
+
+  HTTPClient http;
+
+  http.begin(BACKEND_URL);
+  http.addHeader("Content-Type", "application/json");
+
+  String jsonData = "{";
+
+  jsonData += "\"distance\":";
+  jsonData += String(distanceCM, 2);
+
+  jsonData += ",\"waterLevel\":";
+  jsonData += String(waterLevel, 2);
+
+  jsonData += ",\"temperature\":";
+  jsonData += String(temperatureC, 2);
+
+  jsonData += ",\"rainStatus\":\"";
+  jsonData += rainDetected ? "RAIN DETECTED" : "NO RAIN";
+  jsonData += "\"";
+
+  // CHANGED: now reports the real vibration sensor reading
+  // instead of a hardcoded 0.
+  jsonData += ",\"vibration\":";
+  jsonData += vibrationDetected ? "1" : "0";
+
+  jsonData += "}";
+
+  Serial.println();
+  Serial.println("Sending data to Jal Rakshak Backend...");
+  Serial.println(jsonData);
+
+  int httpCode = http.POST(jsonData);
+
+  if (httpCode > 0)
+  {
+    Serial.print("Backend response code: ");
+    Serial.println(httpCode);
+
+    String response = http.getString();
+
+    Serial.print("Backend response: ");
+    Serial.println(response);
+  }
+  else
+  {
+    Serial.print("Backend error: ");
+    Serial.println(http.errorToString(httpCode));
+  }
+
+  http.end();
+}
+
+
+// ============================================================
+// SEND DATA TO THINGSPEAK
+// ============================================================
+
+void sendToThingSpeak()
+{
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println("ThingSpeak: Wi-Fi not connected.");
+
+    return;
+  }
+
+
+  HTTPClient http;
+
+
+  /*
+     ThingSpeak fields:
+
+     Field 1 = Water Level
+     Field 2 = Temperature
+     Field 3 = Rain Analog
+     Field 4 = Water Rate
+     Field 5 = Risk Score
+     Field 6 = Rain Status
+     Field 7 = Vibration Status
+  */
+
+  String url =
+      "https://api.thingspeak.com/update?api_key=";
+
+  url += THINGSPEAK_API_KEY;
+
+  url += "&field1=";
+  url += String(waterLevel, 2);
+
+  url += "&field2=";
+  url += String(temperatureC, 2);
+
+  url += "&field3=";
+  url += String(rainAnalog);
+
+  url += "&field4=";
+  url += String(rateOfChange, 3);
+
+  url += "&field5=";
+  url += String(riskScore, 0);
+
+  url += "&field6=";
+  url += rainDetected ? "1" : "0";
+
+  url += "&field7=";
+  url += vibrationDetected ? "1" : "0";
+
+
+  Serial.println();
+  Serial.println("Sending data to ThingSpeak...");
+
+  http.begin(url);
+
+  int httpCode = http.GET();
+
+  if (httpCode > 0)
+  {
+    Serial.print("ThingSpeak response: ");
+    Serial.println(httpCode);
+
+    String response =
+        http.getString();
+
+    Serial.print("Entry ID: ");
+    Serial.println(response);
+  }
+  else
+  {
+    Serial.print("ThingSpeak error: ");
+    Serial.println(http.errorToString(httpCode));
+  }
+
+  http.end();
+}
+
+
+// ============================================================
+// INITIALIZE SIM800L
+// ============================================================
+
+void initializeSIM800()
+{
+  Serial.println("Starting SIM800L...");
+
+  sim800.begin(
+    9600,
+    SERIAL_8N1,
+    SIM_RX,
+    SIM_TX
+  );
+
+  delay(3000);
+
+  sim800.println("AT");
+
+  delay(1000);
+
+  sim800.println("ATE0");
+
+  delay(1000);
+
+  sim800.println("AT+CMGF=1");
+
+  delay(1000);
+
+  Serial.println("SIM800L ready.");
+}
+
+
+// ============================================================
+// WEB SERVER: DASHBOARD PAGE
+// ============================================================
+// Builds and serves a small self-refreshing HTML page showing
+// the current sensor readings. Triggered whenever a browser
+// requests "/" from the ESP32's IP address.
+
+void handleRoot()
+{
+  String statusColor = "#2e7d32";   // green = LOW
+
+  if (riskStatus == "MEDIUM")
+  {
+    statusColor = "#f9a825";        // amber
+  }
+  else if (riskStatus == "HIGH")
+  {
+    statusColor = "#ef6c00";        // orange
+  }
+  else if (riskStatus == "CRITICAL")
+  {
+    statusColor = "#c62828";        // red
+  }
+
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta http-equiv='refresh' content='3'>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>JAL-RAKSHAK Dashboard</title>";
+  html += "<style>";
+  html += "body{font-family:Arial,Helvetica,sans-serif;background:#0f172a;color:#e2e8f0;";
+  html += "margin:0;padding:20px;}";
+  html += ".card{background:#1e293b;border-radius:12px;padding:16px 20px;margin-bottom:14px;";
+  html += "box-shadow:0 2px 6px rgba(0,0,0,0.3);}";
+  html += "h1{font-size:22px;margin-bottom:4px;}";
+  html += ".sub{color:#94a3b8;font-size:13px;margin-bottom:20px;}";
+  html += ".label{color:#94a3b8;font-size:13px;}";
+  html += ".value{font-size:26px;font-weight:bold;}";
+  html += ".risk{display:inline-block;padding:6px 14px;border-radius:8px;font-weight:bold;";
+  html += "color:#fff;background:" + statusColor + ";}";
+  html += ".warn{color:#fca5a5;font-weight:bold;}";
+  html += "</style></head><body>";
+
+  html += "<h1>JAL-RAKSHAK</h1>";
+  html += "<div class='sub'>Water Monitoring &amp; Alert System &mdash; auto-refreshes every 3s</div>";
+
+  if (sensorError)
+  {
+    html += "<div class='card'><span class='warn'>WARNING: HC-SR04 timeout / no echo received. ";
+    html += "Water level reading may be invalid.</span></div>";
+  }
+
+  html += "<div class='card'><div class='label'>Risk Status</div>";
+  html += "<span class='risk'>" + riskStatus + " (" + String(riskScore, 0) + "/100)</span></div>";
+
+  html += "<div class='card'><div class='label'>Water Level</div>";
+  html += "<div class='value'>" + String(waterLevel, 1) + " cm</div></div>";
+
+  html += "<div class='card'><div class='label'>Raw Distance (HC-SR04)</div>";
+  html += "<div class='value'>" + String(distanceCM, 1) + " cm</div></div>";
+
+  html += "<div class='card'><div class='label'>Temperature</div>";
+  html += "<div class='value'>" + String(temperatureC, 1) + " &deg;C</div></div>";
+
+  html += "<div class='card'><div class='label'>Rain Status</div>";
+  html += "<div class='value'>" + String(rainDetected ? "RAIN DETECTED" : "NO RAIN") + "</div></div>";
+
+  html += "<div class='card'><div class='label'>Vibration</div>";
+  html += "<div class='value'>" + String(vibrationDetected ? "DETECTED" : "NONE") + "</div></div>";
+
+  html += "<div class='card'><div class='label'>Water Level Rate of Change</div>";
+  html += "<div class='value'>" + String(rateOfChange, 3) + " cm/s</div></div>";
+
+  html += "<div class='sub'>Wi-Fi: " + WiFi.SSID() + " &nbsp;|&nbsp; IP: " + WiFi.localIP().toString() + "</div>";
+
+  html += "</body></html>";
+
+  server.send(200, "text/html", html);
+}
+
+void handleNotFound()
+{
+  server.send(404, "text/plain", "Not found");
+}
+
+void setupWebServer()
+{
+  server.on("/", handleRoot);
+  server.onNotFound(handleNotFound);
+  server.begin();
+
+  Serial.println("Web server started.");
+}
+
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup()
+{
+  Serial.begin(115200);
+
+  delay(1000);
+
+  Serial.println();
+  Serial.println("=================================");
+  Serial.println("      JAL-RAKSHAK STARTING");
+  Serial.println("=================================");
+
+
+  // ----------------------------------------------------------
+  // SENSOR PINS
+  // ----------------------------------------------------------
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  pinMode(RAIN_AO, INPUT);
+
+  pinMode(VIBRATION_PIN, INPUT);
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+
+
+  // ----------------------------------------------------------
+  // I2C LCD
+  // ----------------------------------------------------------
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("JAL-RAKSHAK");
+
+  lcd.setCursor(0, 1);
+  lcd.print("Starting...");
+
+
+  // ----------------------------------------------------------
+  // SIM800L
+  // ----------------------------------------------------------
+
+  initializeSIM800();
+
+
+  // ----------------------------------------------------------
+  // WIFI
+  // ----------------------------------------------------------
+
+  connectWiFi();
+
+
+  // ----------------------------------------------------------
+  // WEB SERVER
+  // ----------------------------------------------------------
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    setupWebServer();
+  }
+
+
+  // ----------------------------------------------------------
+  // INITIAL WATER READING
+  // ----------------------------------------------------------
+
+  distanceCM =
+      readDistance();
+
+  waterLevel =
+      calculateWaterLevel(distanceCM);
+
+  previousWaterLevel =
+      waterLevel;
+
+  previousTime =
+      millis();
+
+
+  delay(2000);
+
+
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("System Ready");
+
+  lcd.setCursor(0, 1);
+  lcd.print("Monitoring...");
+
+
+  delay(2000);
+
+
+  Serial.println();
+  Serial.println("SYSTEM READY");
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    Serial.print("Open dashboard at: http://");
+    Serial.println(WiFi.localIP());
+  }
+}
+
+
+// ============================================================
+// MAIN LOOP
+// ============================================================
+
+void loop()
+{
+  unsigned long currentTime =
+      millis();
+
+
+  // ----------------------------------------------------------
+  // HANDLE INCOMING WEB REQUESTS
+  // Must be called every loop iteration with no long blocking
+  // delays before it, or the page will hang/timeout.
+  // ----------------------------------------------------------
+
+  server.handleClient();
+
+
+  // ----------------------------------------------------------
+  // BUZZER ALARM (non-blocking, runs every loop iteration so
+  // beeping stays responsive even between sensor cycles)
+  // ----------------------------------------------------------
+
+  updateBuzzer();
+
+
+  // ----------------------------------------------------------
+  // READ SENSORS EVERY 3 SECONDS
+  // ----------------------------------------------------------
+
+  if (
+    currentTime - previousTime
+    >= SENSOR_INTERVAL
+  )
+  {
+    float dt =
+      (currentTime - previousTime)
+      / 1000.0;
+
+    previousTime =
+      currentTime;
+
+
+    // --------------------------------------------------------
+    // WATER LEVEL
+    // --------------------------------------------------------
+
+    distanceCM =
+      readDistance();
+
+    waterLevel =
+      calculateWaterLevel(
+        distanceCM
+      );
+
+
+    // --------------------------------------------------------
+    // TEMPERATURE
+    // --------------------------------------------------------
+
+    temperatureC =
+      readTemperature();
+
+
+    // --------------------------------------------------------
+    // RAIN
+    // --------------------------------------------------------
+
+    readRainSensor();
+
+
+    // --------------------------------------------------------
+    // VIBRATION
+    // --------------------------------------------------------
+
+    readVibrationSensor();
+
+
+    // --------------------------------------------------------
+    // WATER BEHAVIOR
+    // --------------------------------------------------------
+
+    calculateWaterRate(
+      waterLevel,
+      dt
+    );
+
+
+    // --------------------------------------------------------
+    // RISK
+    // --------------------------------------------------------
+
+    riskScore =
+      calculateRisk();
+
+    riskStatus =
+      getRiskStatus(
+        riskScore
+      );
+
+
+    // --------------------------------------------------------
+    // SERIAL MONITOR
+    // --------------------------------------------------------
+
+    printSerial();
+
+
+    // --------------------------------------------------------
+    // LCD
+    // --------------------------------------------------------
+
+    displayLCD();
+
+
+    // --------------------------------------------------------
+    // SMS ALERT
+    // --------------------------------------------------------
+
+    checkSMSAlert();
+
+
+    // --------------------------------------------------------
+    // UPDATE PREVIOUS WATER LEVEL
+    // --------------------------------------------------------
+
+    previousWaterLevel =
+      waterLevel;
+  }
+
+
+  // ----------------------------------------------------------
+  // SEND TO THINGSPEAK EVERY 15 SECONDS
+  // ----------------------------------------------------------
+
+  if (
+    currentTime - lastThingSpeakUpdate
+    >= THINGSPEAK_INTERVAL
+  )
+  {
+    lastThingSpeakUpdate =
+      currentTime;
+
+    sendToThingSpeak();
+  }
+
+
+  // ----------------------------------------------------------
+  // SEND DATA TO JAL RAKSHAK BACKEND EVERY 5 SECONDS
+  // ----------------------------------------------------------
+
+  if (
+    currentTime - lastBackendUpdate
+    >= BACKEND_INTERVAL
+  )
+  {
+    lastBackendUpdate = currentTime;
+
+    sendToBackend();
+  }
+}
+* ============================================================
+                  JAL-RAKSHAK
+        Water Monitoring & Alert System
+   ============================================================
+
+   HARDWARE (per latest wiring sheet):
+   ESP32-WROOM-32
+   HC-SR04 Ultrasonic Sensor      (TRIG: GPIO18, ECHO: GPIO19 via voltage divider)
+   LM35 Temperature Sensor        (GPIO34, ADC)
+   Raindrop Sensor Module         (AO: GPIO35, ADC)
+   Vibration Sensor (SW-420)      (DO: GPIO27)
+   Buzzer Module                  (IN/S: GPIO25)
+   I2C 16x2 LCD                   (SDA: GPIO21, SCL: GPIO22)
+   SIM800L GSM Module             (RX2: GPIO16, TX2: GPIO17)
+   XL4015 Power Module            (regulated 5V -> ESP32 VIN, ~4.0V -> SIM800L)
+
+   FUNCTIONS:
+   1. Read water distance
+   2. Calculate water level
+   3. Read temperature
+   4. Read rain sensor
+   5. Read vibration sensor
+   6. Calculate water-level rate
+   7. Calculate risk score
+   8. Display data + alerts on LCD
+   9. Sound buzzer alarm on HIGH/CRITICAL risk
+   10. Print data on Serial Monitor
+   11. Send data to ThingSpeak using Wi-Fi
+   12. Send SMS through SIM800L
+   13. Serve a live dashboard page on the ESP32's own IP address
+*/
+
+
+// ============================================================
+// LIBRARIES
+// ============================================================
+
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <HardwareSerial.h>
+#include <WebServer.h>
+
+
+// ============================================================
+// WIFI SETTINGS
+// ============================================================
+const char* WIFI_SSID = "OnePlus Nord 5";
+const char* WIFI_PASSWORD = "Bala@1234";
+
+// ============================================================
+// THINGSPEAK SETTINGS
+// ============================================================
+// This must be your ThingSpeak channel's WRITE API KEY
+// (a short alphanumeric string from ThingSpeak -> Channel ->
+// API Keys -> Write API Key), NOT a URL.
+
+const char* THINGSPEAK_API_KEY = "YOUR_THINGSPEAK_WRITE_API_KEY";
+
+
+// ============================================================
+// JAL-RAKSHAK BACKEND SETTINGS
+// ============================================================
+
+const char* BACKEND_URL = "http://10.93.146.161:5000/api/sensors";
+
+
+// ============================================================
+// PHONE NUMBER
+// ============================================================
+
+String phoneNumber = "+919025087407";
+
+
+// ============================================================
+// PIN DEFINITIONS  (matches latest wiring sheet)
+// ============================================================
+
+// HC-SR04
+const int TRIG_PIN = 18;
+const int ECHO_PIN = 19;   // through 1k/2k voltage divider to 3.3V logic
+
+// LM35
+const int LM35_PIN = 34;
+
+// Rain sensor (analog only per wiring sheet — no digital pin used)
+const int RAIN_AO = 35;
+
+// Vibration sensor (SW-420)
+const int VIBRATION_PIN = 27;
+
+// Buzzer
+const int BUZZER_PIN = 25;
+
+// I2C LCD
+const int SDA_PIN = 21;
+const int SCL_PIN = 22;
+
+// SIM800L
+const int SIM_RX = 16;   // ESP32 RX <- SIM800L TX
+const int SIM_TX = 17;   // ESP32 TX -> SIM800L RX
+
+
+// ============================================================
+// LCD, SIM800L, WEB SERVER
+// ============================================================
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);   // change address to 0x3F if display stays blank
+
+HardwareSerial sim800(1);
+
+WebServer server(80);
+
+
+// ============================================================
+// WATER LEVEL SETTINGS
+// ============================================================
+
+// Distance from HC-SR04 sensor to the bottom of the tank/channel.
+// CHANGE THIS VALUE according to your actual setup.
+
+const float WATER_REFERENCE_HEIGHT = 200.0;
+
+// HC-SR04 operating limits
+const float MIN_DISTANCE = 2.0;
+const float MAX_DISTANCE = 200.0;
+
+
+// ============================================================
+// RISK SETTINGS
+// ============================================================
+
+const float HIGH_RISK = 70.0;
+const float CRITICAL_RISK = 85.0;
+
+
+// ============================================================
+// BUZZER TIMING
+// ============================================================
+
+const unsigned long BUZZER_BEEP_INTERVAL = 500;   // ms between on/off toggles
+
+
+// ============================================================
+// VARIABLES
+// ============================================================
+
+// Ultrasonic
+float distanceCM = 0.0;
+bool sensorError = false;   // flags an HC-SR04 timeout/no-echo reading
+
+// Water
+float waterLevel = 0.0;
+float previousWaterLevel = 0.0;
+
+// Water behavior
+float rateOfChange = 0.0;
+
+// Temperature
+float temperatureC = 0.0;
+
+// Rain
+int rainAnalog = 0;
+bool rainDetected = false;
+
+// Vibration
+bool vibrationDetected = false;
+
+// Risk
+float riskScore = 0.0;
+String riskStatus = "LOW";
+
+// LCD alert flashing
+bool showAlertScreen = false;
+
+// Buzzer state
+bool buzzerOn = false;
+unsigned long lastBuzzerToggle = 0;
+
+
+// ============================================================
+// TIMING
+// ============================================================
+
+unsigned long previousTime = 0;
+
+unsigned long lastThingSpeakUpdate = 0;
+unsigned long lastBackendUpdate = 0;
+unsigned long lastSMS = 0;
+
+const unsigned long SENSOR_INTERVAL = 3000;
+const unsigned long THINGSPEAK_INTERVAL = 15000;
+const unsigned long BACKEND_INTERVAL = 5000;
+const unsigned long SMS_COOLDOWN = 60000;
+
+
+// ============================================================
+// READ HC-SR04
+// ============================================================
+
+float readDistance()
+{
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+
+  if (duration == 0)
+  {
+    // no echo received -> treat as a sensor error instead
+    // of silently reporting an empty tank.
+    sensorError = true;
+    return MAX_DISTANCE;
+  }
+
+  sensorError = false;
+
+  float distance = duration * 0.0343 / 2.0;
+
+  if (distance < MIN_DISTANCE)
+  {
+    distance = MIN_DISTANCE;
+  }
+
+  if (distance > MAX_DISTANCE)
+  {
+    distance = MAX_DISTANCE;
+  }
+
+  return distance;
+}
+
+
+// ============================================================
+// CALCULATE WATER LEVEL
+// ============================================================
+
+float calculateWaterLevel(float distance)
+{
+  float level = WATER_REFERENCE_HEIGHT - distance;
+
+  if (level < 0)
+  {
+    level = 0;
+  }
+
+  if (level > WATER_REFERENCE_HEIGHT)
+  {
+    level = WATER_REFERENCE_HEIGHT;
+  }
+
+  return level;
+}
+
+
+// ============================================================
+// READ LM35
+// ============================================================
+
+float readTemperature()
+{
+  int adcValue = analogRead(LM35_PIN);
+
+  /*
+     ESP32 ADC reference is approximately 3.3 V.
+
+     LM35:
+     10 mV = 1 degree Celsius
+
+     Temperature:
+     Voltage x 100
+  */
+
+  float voltage = (adcValue / 4095.0) * 3.3;
+
+  float tempC = voltage * 100.0;
+
+  return tempC;
+}
+
+
+// ============================================================
+// READ RAIN SENSOR
+// ============================================================
+
+void readRainSensor()
+{
+  rainAnalog = analogRead(RAIN_AO);
+
+  /*
+     Analog-only reading: lower value generally means MORE
+     water on the sensor plate (wetter = more conductive).
+     Tune RAIN_THRESHOLD to your specific module/board.
+  */
+
+  const int RAIN_THRESHOLD = 2500;
+
+  rainDetected = (rainAnalog < RAIN_THRESHOLD);
+}
+
+
+// ============================================================
+// READ VIBRATION SENSOR (SW-420)
+// ============================================================
+
+void readVibrationSensor()
+{
+  /*
+     SW-420 digital output: most boards output HIGH briefly
+     when vibration/shock exceeds the threshold set by the
+     onboard potentiometer. If your module behaves inverted,
+     flip this comparison.
+  */
+
+  vibrationDetected = (digitalRead(VIBRATION_PIN) == HIGH);
+}
+
+
+// ============================================================
+// CALCULATE WATER RATE
+// ============================================================
+
+void calculateWaterRate(float currentLevel, float dt)
+{
+  if (dt <= 0)
+  {
+    rateOfChange = 0;
+    return;
+  }
+
+  rateOfChange =
+      (currentLevel - previousWaterLevel) / dt;
+}
+
+
+// ============================================================
+// CALCULATE RISK SCORE
+// ============================================================
+
+float calculateRisk()
+{
+  /*
+     Risk factors:
+
+     Water level       = 40%
+     Rate of change    = 25%
+     Temperature       = 10%
+     Rainfall          = 25%
+
+     Vibration is reported separately (LCD/Serial/dashboard/
+     backend) but does not currently feed into this score.
+     Ask if you'd like it folded in with its own weight.
+
+     This is a PROJECT RISK INDEX,
+     not a scientifically calibrated flood probability.
+  */
+
+
+  // ----------------------------------------------------------
+  // WATER LEVEL SCORE
+  // ----------------------------------------------------------
+
+  float levelScore =
+      (waterLevel / WATER_REFERENCE_HEIGHT) * 100.0;
+
+  levelScore =
+      constrain(levelScore, 0.0, 100.0);
+
+
+  // ----------------------------------------------------------
+  // WATER RISE RATE SCORE
+  // ----------------------------------------------------------
+
+  float risingRate = rateOfChange;
+
+  if (risingRate < 0)
+  {
+    risingRate = 0;
+  }
+
+  // 2 cm/sec or more = maximum rate score
+
+  float rateScore =
+      (risingRate / 2.0) * 100.0;
+
+  rateScore =
+      constrain(rateScore, 0.0, 100.0);
+
+
+  // ----------------------------------------------------------
+  // RAIN SCORE
+  // ----------------------------------------------------------
+
+  float rainScore = 0;
+
+  if (rainDetected)
+  {
+    rainScore = 100;
+  }
+
+
+  // ----------------------------------------------------------
+  // TEMPERATURE SCORE
+  // ----------------------------------------------------------
+
+  /*
+     Temperature is included as a supporting environmental
+     factor, not as the main flood indicator.
+
+     Example:
+     20C or lower -> low contribution
+     40C or higher -> maximum contribution
+  */
+
+  float temperatureScore =
+      ((temperatureC - 20.0) / 20.0) * 100.0;
+
+  temperatureScore =
+      constrain(temperatureScore, 0.0, 100.0);
+
+
+  // ----------------------------------------------------------
+  // FINAL RISK SCORE
+  // ----------------------------------------------------------
+
+  float score =
+      (levelScore * 0.40) +
+      (rateScore * 0.25) +
+      (temperatureScore * 0.10) +
+      (rainScore * 0.25);
+
+  score =
+      constrain(score, 0.0, 100.0);
+
+  return score;
+}
+
+
+// ============================================================
+// GET RISK STATUS
+// ============================================================
+
+String getRiskStatus(float score)
+{
+  if (score >= CRITICAL_RISK)
+  {
+    return "CRITICAL";
+  }
+  else if (score >= HIGH_RISK)
+  {
+    return "HIGH";
+  }
+  else if (score >= 40)
+  {
+    return "MEDIUM";
+  }
+  else
+  {
+    return "LOW";
+  }
+}
+
+
+// ============================================================
+// LCD DISPLAY
+// ============================================================
+
+void displayLCD()
+{
+  lcd.clear();
+
+  // surface sensor faults on the LCD instead of showing
+  // a misleading "0 cm / LOW risk" reading.
+  if (sensorError)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("Sensor Error!");
+
+    lcd.setCursor(0, 1);
+    lcd.print("Check HC-SR04");
+
+    return;
+  }
+
+  bool alertActive =
+      (riskStatus == "HIGH" || riskStatus == "CRITICAL");
+
+  // ----------------------------------------------------------
+  // ALERT SCREEN (only shown when risk is HIGH or CRITICAL,
+  // alternating with the normal readings screen every refresh
+  // so the alert flashes and stays noticeable).
+  // ----------------------------------------------------------
+
+  if (alertActive && showAlertScreen)
+  {
+    lcd.setCursor(0, 0);
+
+    if (riskStatus == "CRITICAL")
+    {
+      lcd.print("!! CRITICAL !!");
+    }
+    else
+    {
+      lcd.print("!!  ALERT  !!");
+    }
+
+    lcd.setCursor(0, 1);
+    lcd.print("Water:");
+    lcd.print(waterLevel, 0);
+    lcd.print("cm R:");
+    lcd.print(riskScore, 0);
+  }
+  else
+  {
+    // --------------------------------------------------------
+    // NORMAL READINGS SCREEN
+    // --------------------------------------------------------
+
+    lcd.setCursor(0, 0);
+    lcd.print("L:");
+    lcd.print(waterLevel, 0);
+    lcd.print("cm ");
+
+    lcd.print("T:");
+    lcd.print(temperatureC, 1);
+
+    lcd.setCursor(0, 1);
+
+    if (alertActive)
+    {
+      // Still flag the alert even on the readings screen,
+      // so it's visible on every refresh, not just every other one.
+      lcd.print("ALERT! ");
+      lcd.print(riskScore, 0);
+    }
+    else
+    {
+      lcd.print("Risk:");
+      lcd.print(riskScore, 0);
+      lcd.print(" ");
+      lcd.print(riskStatus);
+    }
+  }
+
+  // Flip the flag so the next refresh shows the other screen.
+  showAlertScreen = !showAlertScreen;
+}
+
+
+// ============================================================
+// BUZZER ALARM
+// ============================================================
+// Non-blocking beeping: toggles the buzzer on/off every
+// BUZZER_BEEP_INTERVAL while risk is HIGH/CRITICAL, and stays
+// silent otherwise. Called every loop() iteration so it never
+// blocks sensor reads, LCD updates, or web requests.
+
+void updateBuzzer()
+{
+  bool alertActive =
+      (riskStatus == "HIGH" || riskStatus == "CRITICAL");
+
+  if (!alertActive)
+  {
+    if (buzzerOn)
+    {
+      digitalWrite(BUZZER_PIN, LOW);
+      buzzerOn = false;
+    }
+    return;
+  }
+
+  unsigned long now = millis();
+
+  if (now - lastBuzzerToggle >= BUZZER_BEEP_INTERVAL)
+  {
+    lastBuzzerToggle = now;
+    buzzerOn = !buzzerOn;
+    digitalWrite(BUZZER_PIN, buzzerOn ? HIGH : LOW);
+  }
+}
+
+
+// ============================================================
+// SERIAL MONITOR
+// ============================================================
+
+void printSerial()
+{
+  Serial.println();
+  Serial.println("======================================");
+  Serial.println("          JAL-RAKSHAK DATA");
+  Serial.println("======================================");
+
+  if (sensorError)
+  {
+    Serial.println("WARNING: HC-SR04 timeout / no echo received.");
+    Serial.println("Water level reading may be invalid.");
+  }
+
+  Serial.print("Distance       : ");
+  Serial.print(distanceCM, 2);
+  Serial.println(" cm");
+
+  Serial.print("Water Level    : ");
+  Serial.print(waterLevel, 2);
+  Serial.println(" cm");
+
+  Serial.print("Temperature    : ");
+  Serial.print(temperatureC, 2);
+  Serial.println(" C");
+
+  Serial.print("Rain Analog    : ");
+  Serial.println(rainAnalog);
+
+  Serial.print("Rain Status    : ");
+  Serial.println(rainDetected ? "RAIN DETECTED" : "NO RAIN");
+
+  Serial.print("Vibration      : ");
+  Serial.println(vibrationDetected ? "DETECTED" : "NONE");
+
+  Serial.print("Water Rate     : ");
+  Serial.print(rateOfChange, 3);
+  Serial.println(" cm/s");
+
+  Serial.print("Risk Score     : ");
+  Serial.print(riskScore, 0);
+  Serial.println("/100");
+
+  Serial.print("Risk Status    : ");
+  Serial.println(riskStatus);
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    Serial.print("Dashboard      : http://");
+    Serial.println(WiFi.localIP());
+  }
+
+  Serial.println("======================================");
+}
+
+
+// ============================================================
+// SEND SMS
+// ============================================================
+
+void sendSMS(String message)
+{
+  Serial.println("Sending SMS...");
+
+  sim800.println("AT+CMGF=1");
+
+  delay(1000);
+
+  sim800.print("AT+CMGS=\"");
+  sim800.print(phoneNumber);
+  sim800.println("\"");
+
+  delay(1000);
+
+  sim800.print(message);
+
+  delay(500);
+
+  // CTRL + Z
+  sim800.write(26);
+
+  delay(5000);
+
+  Serial.println("SMS sent.");
+}
+
+
+// ============================================================
+// CHECK SMS ALERT
+// ============================================================
+
+void checkSMSAlert()
+{
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - lastSMS < SMS_COOLDOWN)
+  {
+    return;
+  }
+
+  if (riskScore >= HIGH_RISK)
+  {
+    String message = "";
+
+    message += "JAL-RAKSHAK ALERT!\n";
+
+    message += "Status: ";
+    message += riskStatus;
+
+    message += "\nRisk: ";
+    message += String(riskScore, 0);
+    message += "/100";
+
+    message += "\nWater: ";
+    message += String(waterLevel, 1);
+    message += " cm";
+
+    message += "\nTemp: ";
+    message += String(temperatureC, 1);
+    message += " C";
+
+    message += "\nRate: ";
+    message += String(rateOfChange, 2);
+    message += " cm/s";
+
+    message += "\nRain: ";
+    message += rainDetected ? "YES" : "NO";
+
+    message += "\nVibration: ";
+    message += vibrationDetected ? "YES" : "NO";
+
+    sendSMS(message);
+
+    lastSMS = currentMillis;
+  }
+}
+
+
+// ============================================================
+// CONNECT TO WIFI
+// ============================================================
+
+void connectWiFi()
+{
+  Serial.println();
+  Serial.println("Connecting to Wi-Fi...");
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  int attempts = 0;
+
+  while (WiFi.status() != WL_CONNECTED &&
+         attempts < 20)
+  {
+    delay(500);
+
+    Serial.print(".");
+
+    attempts++;
+  }
+
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    Serial.println("Wi-Fi connected.");
+
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+  }
+  else
+  {
+    Serial.println("Wi-Fi connection failed.");
+  }
+}
+
+
+// ============================================================
+// SEND DATA TO JAL RAKSHAK BACKEND
+// ============================================================
+
+void sendToBackend()
+{
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println("Backend: Wi-Fi not connected.");
+    return;
+  }
+
+  HTTPClient http;
+
+  http.begin(BACKEND_URL);
+  http.addHeader("Content-Type", "application/json");
+
+  String jsonData = "{";
+
+  jsonData += "\"distance\":";
+  jsonData += String(distanceCM, 2);
+
+  jsonData += ",\"waterLevel\":";
+  jsonData += String(waterLevel, 2);
+
+  jsonData += ",\"temperature\":";
+  jsonData += String(temperatureC, 2);
+
+  jsonData += ",\"rainStatus\":\"";
+  jsonData += rainDetected ? "RAIN DETECTED" : "NO RAIN";
+  jsonData += "\"";
+
+  // CHANGED: now reports the real vibration sensor reading
+  // instead of a hardcoded 0.
+  jsonData += ",\"vibration\":";
+  jsonData += vibrationDetected ? "1" : "0";
+
+  jsonData += "}";
+
+  Serial.println();
+  Serial.println("Sending data to Jal Rakshak Backend...");
+  Serial.println(jsonData);
+
+  int httpCode = http.POST(jsonData);
+
+  if (httpCode > 0)
+  {
+    Serial.print("Backend response code: ");
+    Serial.println(httpCode);
+
+    String response = http.getString();
+
+    Serial.print("Backend response: ");
+    Serial.println(response);
+  }
+  else
+  {
+    Serial.print("Backend error: ");
+    Serial.println(http.errorToString(httpCode));
+  }
+
+  http.end();
+}
+
+
+// ============================================================
+// SEND DATA TO THINGSPEAK
+// ============================================================
+
+void sendToThingSpeak()
+{
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println("ThingSpeak: Wi-Fi not connected.");
+
+    return;
+  }
+
+
+  HTTPClient http;
+
+
+  /*
+     ThingSpeak fields:
+
+     Field 1 = Water Level
+     Field 2 = Temperature
+     Field 3 = Rain Analog
+     Field 4 = Water Rate
+     Field 5 = Risk Score
+     Field 6 = Rain Status
+     Field 7 = Vibration Status
+  */
+
+  String url =
+      "https://api.thingspeak.com/update?api_key=";
+
+  url += THINGSPEAK_API_KEY;
+
+  url += "&field1=";
+  url += String(waterLevel, 2);
+
+  url += "&field2=";
+  url += String(temperatureC, 2);
+
+  url += "&field3=";
+  url += String(rainAnalog);
+
+  url += "&field4=";
+  url += String(rateOfChange, 3);
+
+  url += "&field5=";
+  url += String(riskScore, 0);
+
+  url += "&field6=";
+  url += rainDetected ? "1" : "0";
+
+  url += "&field7=";
+  url += vibrationDetected ? "1" : "0";
+
+
+  Serial.println();
+  Serial.println("Sending data to ThingSpeak...");
+
+  http.begin(url);
+
+  int httpCode = http.GET();
+
+  if (httpCode > 0)
+  {
+    Serial.print("ThingSpeak response: ");
+    Serial.println(httpCode);
+
+    String response =
+        http.getString();
+
+    Serial.print("Entry ID: ");
+    Serial.println(response);
+  }
+  else
+  {
+    Serial.print("ThingSpeak error: ");
+    Serial.println(http.errorToString(httpCode));
+  }
+
+  http.end();
+}
+
+
+// ============================================================
+// INITIALIZE SIM800L
+// ============================================================
+
+void initializeSIM800()
+{
+  Serial.println("Starting SIM800L...");
+
+  sim800.begin(
+    9600,
+    SERIAL_8N1,
+    SIM_RX,
+    SIM_TX
+  );
+
+  delay(3000);
+
+  sim800.println("AT");
+
+  delay(1000);
+
+  sim800.println("ATE0");
+
+  delay(1000);
+
+  sim800.println("AT+CMGF=1");
+
+  delay(1000);
+
+  Serial.println("SIM800L ready.");
+}
+
+
+// ============================================================
+// WEB SERVER: DASHBOARD PAGE
+// ============================================================
+// Builds and serves a small self-refreshing HTML page showing
+// the current sensor readings. Triggered whenever a browser
+// requests "/" from the ESP32's IP address.
+
+void handleRoot()
+{
+  String statusColor = "#2e7d32";   // green = LOW
+
+  if (riskStatus == "MEDIUM")
+  {
+    statusColor = "#f9a825";        // amber
+  }
+  else if (riskStatus == "HIGH")
+  {
+    statusColor = "#ef6c00";        // orange
+  }
+  else if (riskStatus == "CRITICAL")
+  {
+    statusColor = "#c62828";        // red
+  }
+
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta http-equiv='refresh' content='3'>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>JAL-RAKSHAK Dashboard</title>";
+  html += "<style>";
+  html += "body{font-family:Arial,Helvetica,sans-serif;background:#0f172a;color:#e2e8f0;";
+  html += "margin:0;padding:20px;}";
+  html += ".card{background:#1e293b;border-radius:12px;padding:16px 20px;margin-bottom:14px;";
+  html += "box-shadow:0 2px 6px rgba(0,0,0,0.3);}";
+  html += "h1{font-size:22px;margin-bottom:4px;}";
+  html += ".sub{color:#94a3b8;font-size:13px;margin-bottom:20px;}";
+  html += ".label{color:#94a3b8;font-size:13px;}";
+  html += ".value{font-size:26px;font-weight:bold;}";
+  html += ".risk{display:inline-block;padding:6px 14px;border-radius:8px;font-weight:bold;";
+  html += "color:#fff;background:" + statusColor + ";}";
+  html += ".warn{color:#fca5a5;font-weight:bold;}";
+  html += "</style></head><body>";
+
+  html += "<h1>JAL-RAKSHAK</h1>";
+  html += "<div class='sub'>Water Monitoring &amp; Alert System &mdash; auto-refreshes every 3s</div>";
+
+  if (sensorError)
+  {
+    html += "<div class='card'><span class='warn'>WARNING: HC-SR04 timeout / no echo received. ";
+    html += "Water level reading may be invalid.</span></div>";
+  }
+
+  html += "<div class='card'><div class='label'>Risk Status</div>";
+  html += "<span class='risk'>" + riskStatus + " (" + String(riskScore, 0) + "/100)</span></div>";
+
+  html += "<div class='card'><div class='label'>Water Level</div>";
+  html += "<div class='value'>" + String(waterLevel, 1) + " cm</div></div>";
+
+  html += "<div class='card'><div class='label'>Raw Distance (HC-SR04)</div>";
+  html += "<div class='value'>" + String(distanceCM, 1) + " cm</div></div>";
+
+  html += "<div class='card'><div class='label'>Temperature</div>";
+  html += "<div class='value'>" + String(temperatureC, 1) + " &deg;C</div></div>";
+
+  html += "<div class='card'><div class='label'>Rain Status</div>";
+  html += "<div class='value'>" + String(rainDetected ? "RAIN DETECTED" : "NO RAIN") + "</div></div>";
+
+  html += "<div class='card'><div class='label'>Vibration</div>";
+  html += "<div class='value'>" + String(vibrationDetected ? "DETECTED" : "NONE") + "</div></div>";
+
+  html += "<div class='card'><div class='label'>Water Level Rate of Change</div>";
+  html += "<div class='value'>" + String(rateOfChange, 3) + " cm/s</div></div>";
+
+  html += "<div class='sub'>Wi-Fi: " + WiFi.SSID() + " &nbsp;|&nbsp; IP: " + WiFi.localIP().toString() + "</div>";
+
+  html += "</body></html>";
+
+  server.send(200, "text/html", html);
+}
+
+void handleNotFound()
+{
+  server.send(404, "text/plain", "Not found");
+}
+
+void setupWebServer()
+{
+  server.on("/", handleRoot);
+  server.onNotFound(handleNotFound);
+  server.begin();
+
+  Serial.println("Web server started.");
+}
+
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup()
+{
+  Serial.begin(115200);
+
+  delay(1000);
+
+  Serial.println();
+  Serial.println("=================================");
+  Serial.println("      JAL-RAKSHAK STARTING");
+  Serial.println("=================================");
+
+
+  // ----------------------------------------------------------
+  // SENSOR PINS
+  // ----------------------------------------------------------
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  pinMode(RAIN_AO, INPUT);
+
+  pinMode(VIBRATION_PIN, INPUT);
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+
+
+  // ----------------------------------------------------------
+  // I2C LCD
+  // ----------------------------------------------------------
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("JAL-RAKSHAK");
+
+  lcd.setCursor(0, 1);
+  lcd.print("Starting...");
+
+
+  // ----------------------------------------------------------
+  // SIM800L
+  // ----------------------------------------------------------
+
+  initializeSIM800();
+
+
+  // ----------------------------------------------------------
+  // WIFI
+  // ----------------------------------------------------------
+
+  connectWiFi();
+
+
+  // ----------------------------------------------------------
+  // WEB SERVER
+  // ----------------------------------------------------------
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    setupWebServer();
+  }
+
+
+  // ----------------------------------------------------------
+  // INITIAL WATER READING
+  // ----------------------------------------------------------
+
+  distanceCM =
+      readDistance();
+
+  waterLevel =
+      calculateWaterLevel(distanceCM);
+
+  previousWaterLevel =
+      waterLevel;
+
+  previousTime =
+      millis();
+
+
+  delay(2000);
+
+
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("System Ready");
+
+  lcd.setCursor(0, 1);
+  lcd.print("Monitoring...");
+
+
+  delay(2000);
+
+
+  Serial.println();
+  Serial.println("SYSTEM READY");
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    Serial.print("Open dashboard at: http://");
+    Serial.println(WiFi.localIP());
+  }
+}
+
+
+// ============================================================
+// MAIN LOOP
+// ============================================================
+
+void loop()
+{
+  unsigned long currentTime =
+      millis();
+
+
+  // ----------------------------------------------------------
+  // HANDLE INCOMING WEB REQUESTS
+  // Must be called every loop iteration with no long blocking
+  // delays before it, or the page will hang/timeout.
+  // ----------------------------------------------------------
+
+  server.handleClient();
+
+
+  // ----------------------------------------------------------
+  // BUZZER ALARM (non-blocking, runs every loop iteration so
+  // beeping stays responsive even between sensor cycles)
+  // ----------------------------------------------------------
+
+  updateBuzzer();
+
+
+  // ----------------------------------------------------------
+  // READ SENSORS EVERY 3 SECONDS
+  // ----------------------------------------------------------
+
+  if (
+    currentTime - previousTime
+    >= SENSOR_INTERVAL
+  )
+  {
+    float dt =
+      (currentTime - previousTime)
+      / 1000.0;
+
+    previousTime =
+      currentTime;
+
+
+    // --------------------------------------------------------
+    // WATER LEVEL
+    // --------------------------------------------------------
+
+    distanceCM =
+      readDistance();
+
+    waterLevel =
+      calculateWaterLevel(
+        distanceCM
+      );
+
+
+    // --------------------------------------------------------
+    // TEMPERATURE
+    // --------------------------------------------------------
+
+    temperatureC =
+      readTemperature();
+
+
+    // --------------------------------------------------------
+    // RAIN
+    // --------------------------------------------------------
+
+    readRainSensor();
+
+
+    // --------------------------------------------------------
+    // VIBRATION
+    // --------------------------------------------------------
+
+    readVibrationSensor();
+
+
+    // --------------------------------------------------------
+    // WATER BEHAVIOR
+    // --------------------------------------------------------
+
+    calculateWaterRate(
+      waterLevel,
+      dt
+    );
+
+
+    // --------------------------------------------------------
+    // RISK
+    // --------------------------------------------------------
+
+    riskScore =
+      calculateRisk();
+
+    riskStatus =
+      getRiskStatus(
+        riskScore
+      );
+
+
+    // --------------------------------------------------------
+    // SERIAL MONITOR
+    // --------------------------------------------------------
+
+    printSerial();
+
+
+    // --------------------------------------------------------
+    // LCD
+    // --------------------------------------------------------
+
+    displayLCD();
+
+
+    // --------------------------------------------------------
+    // SMS ALERT
+    // --------------------------------------------------------
+
+    checkSMSAlert();
+
+
+    // --------------------------------------------------------
+    // UPDATE PREVIOUS WATER LEVEL
+    // --------------------------------------------------------
+
+    previousWaterLevel =
+      waterLevel;
+  }
+
+
+  // ----------------------------------------------------------
+  // SEND TO THINGSPEAK EVERY 15 SECONDS
+  // ----------------------------------------------------------
+
+  if (
+    currentTime - lastThingSpeakUpdate
+    >= THINGSPEAK_INTERVAL
+  )
+  {
+    lastThingSpeakUpdate =
+      currentTime;
+
+    sendToThingSpeak();
+  }
+
+
+  // ----------------------------------------------------------
+  // SEND DATA TO JAL RAKSHAK BACKEND EVERY 5 SECONDS
+  // ----------------------------------------------------------
+
+  if (
+    currentTime - lastBackendUpdate
+    >= BACKEND_INTERVAL
+  )
+  {
+    lastBackendUpdate = currentTime;
+
+    sendToBackend();
+  }
+}
+
