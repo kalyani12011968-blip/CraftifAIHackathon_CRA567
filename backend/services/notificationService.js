@@ -1,175 +1,43 @@
-<<<<<<< HEAD
-const {
-  sendSMS
-} = require("../../alerts/gsm/smsService");
+let gsmSms = null;
+let gpsLocation = null;
+let buzzerSvc = null;
+let displaySvc = null;
 
-const {
-  getLocation,
-  getGoogleMapsLink
-} = require("../../alerts/gps/locationService");
-
-const {
-  activateBuzzer
-} = require("../../alerts/local/buzzerService");
-
-const {
-  showStatus,
-  showAlert
-} = require("../../alerts/local/displayService");
-
-async function processNotification(data) {
-
-  const riskScore = Number(
-    data.riskScore ?? 0
-  );
-
-  const event =
-    data.event ||
-    data.eventType ||
-    "NORMAL";
-
-  const status =
-    data.status ||
-    getStatusFromRisk(riskScore);
-
-  /*
-   * ========================================
-   * LOCAL DISPLAY
-   * ========================================
-   */
-
-  showStatus({
-    status,
-    waterLevel: data.waterLevel,
-    riskScore,
-    waterTrend: data.waterTrend
-  });
-
-  /*
-   * ========================================
-   * SAFE
-   * ========================================
-   */
-
-  if (riskScore < 51) {
-
-    return {
-      success: true,
-      alertTriggered: false,
-      status: "SAFE"
-    };
-  }
-
-  /*
-   * ========================================
-   * WARNING / CRITICAL
-   * ========================================
-   */
-
-  let buzzerLevel = "WARNING";
-
-  if (riskScore >= 76) {
-    buzzerLevel = "CRITICAL";
-  }
-
-  const buzzer = activateBuzzer(
-    buzzerLevel
-  );
-
-  showAlert(
-    `WATER RISK: ${status} | Risk ${riskScore}/100`
-  );
-
-  /*
-   * ========================================
-   * GPS
-   * ========================================
-   */
-
-  const location =
-    getLocation(data);
-
-  const mapLink =
-    getGoogleMapsLink(data);
-
-  /*
-   * ========================================
-   * GSM SMS
-   * ========================================
-   */
-
-  const sms =
-    await sendSMS({
-      alertType:
-        event !== "NORMAL"
-          ? event
-          : status === "CRITICAL"
-            ? "CRITICAL"
-            : "GENERAL",
-      data
-    });
-
-  return {
-    success: true,
-
-    alertTriggered: true,
-
-    status,
-
-    riskScore,
-
-    event,
-
-    buzzer,
-
-    sms,
-
-    location,
-
-    mapLink,
-
-    timestamp:
-      new Date().toISOString()
-  };
+try {
+  gsmSms = require("../../alerts/gsm/smsService");
+  gpsLocation = require("../../alerts/gps/locationService");
+  buzzerSvc = require("../../alerts/local/buzzerService");
+  displaySvc = require("../../alerts/local/displayService");
+} catch (e) {
+  // alerts modules are optional in local development
 }
 
-function getStatusFromRisk(score) {
-
-  if (score >= 76) {
-    return "CRITICAL";
-  }
-
-  if (score >= 51) {
-    return "WARNING";
-  }
-
-  if (score >= 26) {
-    return "WATCH";
-  }
-
-  return "SAFE";
-}
-
-module.exports = {
-  processNotification,
-  getStatusFromRisk
-};
-=======
 const buildAlertMessage = (data) => {
   return [
     "JAL-RAKSHAK ALERT",
     `Device: ${data.deviceId || "Unknown"}`,
-    `Event: ${data.event || "Unknown"}`,
+    `Event: ${data.event || data.eventType || "Unknown"}`,
     `Risk: ${data.riskScore ?? "N/A"}/100`,
     `Status: ${data.status || "UNKNOWN"}`,
-    `Water Level: ${data.waterLevel ?? "N/A"}`,
-    `Rise Rate: ${data.riseRate ?? "N/A"}`,
+    `Water Level: ${data.waterLevel ?? "N/A"} cm`,
+    `Rise Rate: ${data.riseRate ?? "N/A"} cm/s`,
     `Location: ${data.latitude ?? "N/A"}, ${data.longitude ?? "N/A"}`
   ].join("\n");
 };
 
 const sendSMS = async (data) => {
   const message = buildAlertMessage(data);
+
+  if (gsmSms && typeof gsmSms.sendSMS === "function") {
+    try {
+      return await gsmSms.sendSMS({
+        alertType: data.event || "GENERAL",
+        data
+      });
+    } catch (err) {
+      console.warn("GSM SMS failure:", err.message);
+    }
+  }
 
   if (!process.env.ALERT_PHONE_NUMBER) {
     return {
@@ -181,13 +49,70 @@ const sendSMS = async (data) => {
 
   return {
     sent: false,
-    reason: "SIM800/GSM gateway connection is not configured in the server",
+    reason: "GSM gateway simulated in development environment",
     message
   };
 };
 
+function getStatusFromRisk(score) {
+  if (score >= 76) return "CRITICAL";
+  if (score >= 51) return "WARNING";
+  if (score >= 26) return "WATCH";
+  return "SAFE";
+}
+
+async function processNotification(data) {
+  const riskScore = Number(data.riskScore ?? 0);
+  const event = data.event || data.eventType || "NORMAL";
+  const status = data.status || getStatusFromRisk(riskScore);
+
+  if (displaySvc && typeof displaySvc.showStatus === "function") {
+    displaySvc.showStatus({
+      status,
+      waterLevel: data.waterLevel,
+      riskScore,
+      waterTrend: data.waterTrend
+    });
+  }
+
+  if (riskScore < 51) {
+    return {
+      success: true,
+      alertTriggered: false,
+      status: "SAFE"
+    };
+  }
+
+  let buzzer = null;
+  if (buzzerSvc && typeof buzzerSvc.activateBuzzer === "function") {
+    buzzer = buzzerSvc.activateBuzzer(riskScore >= 76 ? "CRITICAL" : "WARNING");
+  }
+
+  if (displaySvc && typeof displaySvc.showAlert === "function") {
+    displaySvc.showAlert(`WATER RISK: ${status} | Risk ${riskScore}/100`);
+  }
+
+  const location = gpsLocation && typeof gpsLocation.getLocation === "function" ? gpsLocation.getLocation(data) : null;
+  const mapLink = gpsLocation && typeof gpsLocation.getGoogleMapsLink === "function" ? gpsLocation.getGoogleMapsLink(data) : null;
+  const sms = await sendSMS(data);
+
+  return {
+    success: true,
+    alertTriggered: true,
+    status,
+    riskScore,
+    event,
+    buzzer,
+    sms,
+    location,
+    mapLink,
+    timestamp: new Date().toISOString()
+  };
+}
+
 module.exports = {
   buildAlertMessage,
-  sendSMS
+  sendSMS,
+  processNotification,
+  getStatusFromRisk
 };
->>>>>>> e236aa37c353724fa19dffdf3f7b9b17cecac8f5

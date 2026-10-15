@@ -1,0 +1,10 @@
+{
+  "timestamp": "2026-10-15T14:50:46.004774+00:00",
+  "pipelineId": "jal_rakshak_edge_water_hazard_v1",
+  "pipelineVersion": "0.5.1",
+  "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+  "pipegenInstalled": false,
+  "pipegenVersion": null,
+  "status": "PREREQUISITE_ACTION_REQUIRED",
+  "actionRequired": "PipeGen CLI (v0.5.1) is not in the default WSL PATH. Download PipeGen from https://developer.craftifai.com/dashboard?tab=downloads and run: pip install craftifai-pipegen==0.5.1 inside WSL2 Ubuntu 24.04."
+}

@@ -1,180 +1,21 @@
-<<<<<<< HEAD
-const {
-    analyzeWaterBehavior
-} = require("./waterBehaviorService");
-
-const {
-    calculateRisk
-} = require("./riskService");
-
-const {
-    createEvent
-} = require("./eventService");
-
-const {
-    createAlert
-} = require("./alertService");
-
-const {
-    addToCollection
-} = require("./storageService");
-
-const {
-    emit
-} = require("./socketService");
-
-async function processSensorData(data) {
-
-    /* 1. Water behavior */
-
-    let processed =
-        analyzeWaterBehavior(data);
-
-    /* 2. Risk */
-
-    processed =
-        calculateRisk(processed);
-
-    /* 3. Event classification */
-
-    let event =
-        "NORMAL";
-
-    if (
-        processed.waterTrend ===
-        "RAPID_RISE" ||
-        processed.riskScore >= 76
-    ) {
-
-        event =
-            "FLOOD_ESCALATION";
-
-    } else if (
-        processed.waterTrend ===
-        "RAPID_FALL"
-    ) {
-
-        event =
-            "ABNORMAL_WATER_LOSS";
-
-    } else if (
-        processed.sensorQuality < 40
-    ) {
-
-        event =
-            "SENSOR_ANOMALY";
-    }
-
-    processed.event = event;
-
-    /* 4. Save sensor data */
-
-    addToCollection(
-        "sensorData",
-        processed
-    );
-
-    /* 5. Create event */
-
-    let createdEvent = null;
-
-    if (event !== "NORMAL") {
-
-        createdEvent =
-            createEvent({
-                ...processed,
-                event
-            });
-    }
-
-    /* 6. Create alert */
-
-    let alert = null;
-
-    if (
-        processed.riskScore >= 51
-    ) {
-
-        alert =
-            createAlert({
-                ...processed,
-                event
-            });
-    }
-
-    /* 7. Socket updates */
-
-    emit(
-        "sensor:update",
-        processed
-    );
-
-    emit(
-        "risk:update",
-        {
-            deviceId:
-                processed.deviceId,
-
-            riskScore:
-                processed.riskScore,
-
-            status:
-                processed.status
-        }
-    );
-
-    if (createdEvent) {
-
-        emit(
-            "event:new",
-            createdEvent
-        );
-    }
-
-    if (alert) {
-
-        emit(
-            "alert:new",
-            alert
-        );
-    }
-
-    return {
-        sensor: processed,
-        event: createdEvent,
-        alert
-    };
-}
-
-function getSensorHistory() {
-
-    const {
-        readCollection
-    } = require("./storageService");
-
-    return readCollection(
-        "sensorData"
-    );
-}
-
-module.exports = {
-    processSensorData,
-    getSensorHistory
-};
-=======
 const fs = require("fs");
 const path = require("path");
 const { db } = require("../config/firebase");
+const { analyzeWaterBehavior, calculateHistoricalBaseline } = require("./waterBehaviorService");
+const { calculateRisk } = require("./riskService");
+const { classifyEvent, createEvent } = require("./eventService");
+const { createAlert } = require("./alertService");
+const { addToCollection, readCollection } = require("./storageService");
+const { emit } = require("./socketService");
+const { updateLastSeen } = require("./deviceService");
 
 const DATA_FILE = path.join(__dirname, "../data/sensorData.json");
 
 const ensureFile = () => {
   const directory = path.dirname(DATA_FILE);
-
   if (!fs.existsSync(directory)) {
     fs.mkdirSync(directory, { recursive: true });
   }
-
   if (!fs.existsSync(DATA_FILE)) {
     fs.writeFileSync(DATA_FILE, "[]");
   }
@@ -182,7 +23,12 @@ const ensureFile = () => {
 
 const readLocal = () => {
   ensureFile();
-  return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+  try {
+    const raw = fs.readFileSync(DATA_FILE, "utf8");
+    return raw.trim() ? JSON.parse(raw) : [];
+  } catch (e) {
+    return [];
+  }
 };
 
 const writeLocal = (data) => {
@@ -194,55 +40,48 @@ const saveSensorReading = async (data) => {
   const reading = {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     timestamp: data.timestamp || new Date().toISOString(),
-    deviceId: data.deviceId,
-    waterLevel: data.waterLevel,
-    rainfall: data.rainfall,
-    temperature: data.temperature,
+    deviceId: data.deviceId || data.device_id || "ESP32-001",
+    waterLevel: Number(data.waterLevel !== undefined ? data.waterLevel : data.water_level || 0),
+    rainfall: Number(data.rainfall !== undefined ? data.rainfall : 0),
+    temperature: Number(data.temperature !== undefined ? data.temperature : 25),
     latitude: data.latitude ?? null,
     longitude: data.longitude ?? null,
     sensorQuality: data.sensorQuality ?? 1
   };
 
   if (db) {
-    const ref = await db.collection("sensor_readings").add(reading);
-    return {
-      ...reading,
-      id: ref.id
-    };
+    try {
+      const ref = await db.collection("sensor_readings").add(reading);
+      reading.id = ref.id;
+    } catch (e) {
+      // fallback
+    }
   }
 
   const history = readLocal();
   history.push(reading);
-
-  if (history.length > 10000) {
-    history.splice(0, history.length - 10000);
+  if (history.length > 5000) {
+    history.splice(0, history.length - 5000);
   }
-
   writeLocal(history);
+
   return reading;
 };
 
 const getHistory = async (deviceId) => {
   if (db) {
-    let query = db
-      .collection("sensor_readings")
-      .orderBy("timestamp", "desc")
-      .limit(1000);
-
-    if (deviceId) {
-      query = db
-        .collection("sensor_readings")
-        .where("deviceId", "==", deviceId)
-        .orderBy("timestamp", "desc")
-        .limit(1000);
+    try {
+      let query = db.collection("sensor_readings").orderBy("timestamp", "desc").limit(1000);
+      if (deviceId) {
+        query = db.collection("sensor_readings").where("deviceId", "==", deviceId).orderBy("timestamp", "desc").limit(1000);
+      }
+      const snap = await query.get();
+      if (!snap.empty) {
+        return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      }
+    } catch (e) {
+      // fallback
     }
-
-    const snap = await query.get();
-
-    return snap.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data()
-    }));
   }
 
   return readLocal()
@@ -261,10 +100,87 @@ const getPrevious = async (deviceId) => {
   return history.length > 1 ? history[1] : null;
 };
 
+async function processSensorData(data) {
+  const reading = await saveSensorReading(data);
+  const history = await getHistory(reading.deviceId);
+  const previous = history.length > 1 ? history[1] : null;
+  const baselineHistory = history.slice(2, 102).filter(item => Number.isFinite(item.waterLevel));
+  const historical = calculateHistoricalBaseline(baselineHistory);
+
+  let behavior = analyzeWaterBehavior(reading, previous, historical);
+  const sensorQuality = reading.sensorQuality ?? 1;
+
+  let eventType = classifyEvent({
+    ...behavior,
+    sensorQuality
+  });
+
+  let risk = calculateRisk({
+    ...behavior,
+    sensorQuality
+  });
+
+  behavior.event = eventType;
+  behavior.riskScore = risk.riskScore;
+  behavior.status = risk.status;
+
+  await updateLastSeen(reading.deviceId);
+
+  let createdEvent = null;
+  if (eventType !== "NORMAL") {
+    createdEvent = await createEvent({
+      deviceId: reading.deviceId,
+      event: eventType,
+      type: eventType,
+      riskScore: risk.riskScore,
+      latitude: reading.latitude,
+      longitude: reading.longitude,
+      description: `Sensor event ${eventType} detected with risk score ${risk.riskScore}`
+    });
+  }
+
+  let createdAlert = null;
+  if (risk.riskScore >= 51) {
+    createdAlert = await createAlert({
+      deviceId: reading.deviceId,
+      event: eventType,
+      riskScore: risk.riskScore,
+      status: risk.status,
+      message: `Flood escalation alert for device ${reading.deviceId}: ${risk.status} (score: ${risk.riskScore})`
+    });
+  }
+
+  // Real-time Socket.IO broadcasts
+  emit("sensor:update", { ...reading, ...behavior });
+  emit("sensorData", { ...reading, ...behavior });
+  emit("risk:update", {
+    deviceId: reading.deviceId,
+    riskScore: risk.riskScore,
+    status: risk.status,
+    factors: risk.factors
+  });
+
+  if (createdEvent) {
+    emit("event:new", createdEvent);
+  }
+  if (createdAlert) {
+    emit("alert:new", createdAlert);
+  }
+
+  return {
+    reading,
+    behavior,
+    event: createdEvent || { event: eventType },
+    risk,
+    alert: createdAlert
+  };
+}
+
 module.exports = {
   saveSensorReading,
+  getHistory,
   getLatest,
   getPrevious,
-  getHistory
+  processSensorData,
+  getSensorHistory: getHistory
 };
->>>>>>> e236aa37c353724fa19dffdf3f7b9b17cecac8f5

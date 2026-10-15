@@ -1,7 +1,7 @@
 const {
     SYSTEM_PROMPT,
     buildChatPrompt
-} = require("C:\\JAL-RAKSHAK\\JAL-RAKSHAK\\llm\\promptTemplates.js");
+} = require("./promptTemplates");
 
 async function askAssistant(
     question,

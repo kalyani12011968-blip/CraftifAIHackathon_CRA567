@@ -15,12 +15,14 @@ import Analytics from "./pages/Analytics";
 import AIAssistant from "./pages/AIAssistant";
 import MapPage from "./pages/Map";
 import Settings from "./pages/Settings";
+import VisionEdge from "./pages/VisionEdge";
 
 export default function App(){
  return <AppProvider><Routes>
    <Route path="/" element={<Landing/>}/>
    <Route element={<AppShell/>}>
     <Route path="/dashboard" element={<Dashboard/>}/>
+    <Route path="/vision-edge" element={<VisionEdge/>}/>
     <Route path="/monitoring" element={<Monitoring/>}/>
     <Route path="/risk" element={<RiskPrediction/>}/>
     <Route path="/devices" element={<Devices/>}/>

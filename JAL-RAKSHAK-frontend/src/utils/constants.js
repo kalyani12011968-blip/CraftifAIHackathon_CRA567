@@ -9,6 +9,7 @@ export const EVENTS = ["NORMAL", "FLOOD_ESCALATION", "ABNORMAL_WATER_LOSS", "SEN
 
 export const NAV_ITEMS = [
   ["Dashboard", "/dashboard", "LayoutDashboard"],
+  ["Vision Edge", "/vision-edge", "Camera"],
   ["Live Monitoring", "/monitoring", "Activity"],
   ["Risk Prediction", "/risk", "ShieldAlert"],
   ["Devices", "/devices", "Cpu"],

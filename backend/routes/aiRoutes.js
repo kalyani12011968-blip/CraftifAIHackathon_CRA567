@@ -4,7 +4,7 @@ const {
     prediction,
     analyze,
     chat
-} = require("C:\\JAL-RAKSHAK\\JAL-RAKSHAK\\backend\\controllers\\aiController.js");
+} = require("../controllers/aiController");
 
 const router = express.Router();
 

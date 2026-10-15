@@ -11,33 +11,17 @@ require("dotenv").config();
 // CHECK DATABASE URL
 // ============================================================
 
-if (!process.env.DATABASE_URL) {
-    console.error("");
-    console.error("==========================================");
-    console.error("       DATABASE CONFIGURATION ERROR");
-    console.error("==========================================");
-    console.error("");
-    console.error("DATABASE_URL is missing.");
-    console.error("");
-    console.error("Add DATABASE_URL to:");
-    console.error("backend/.env");
-    console.error("");
-    console.error("==========================================");
-    console.error("");
+let sql = null;
 
-    throw new Error(
-        "DATABASE_URL is missing from backend/.env"
-    );
+if (process.env.DATABASE_URL) {
+    try {
+        sql = neon(process.env.DATABASE_URL);
+    } catch (err) {
+        console.warn("Neon initialization warning:", err.message);
+    }
+} else {
+    console.log("Neon DATABASE_URL not configured. Operating in local storage / mock mode.");
 }
-
-
-// ============================================================
-// CREATE NEON SQL CLIENT
-// ============================================================
-
-const sql = neon(
-    process.env.DATABASE_URL
-);
 
 
 // ============================================================
@@ -45,6 +29,9 @@ const sql = neon(
 // ============================================================
 
 async function testDatabaseConnection() {
+    if (!sql) {
+        return false;
+    }
 
     try {
 
@@ -90,7 +77,7 @@ async function testDatabaseConnection() {
 // ============================================================
 
 async function checkDatabaseTables() {
-
+    if (!sql) return [];
     try {
 
         const tables = await sql`
@@ -145,14 +132,15 @@ async function checkDatabaseTables() {
 // ============================================================
 
 async function verifyRequiredTables() {
-
+    if (!sql) return false;
     const requiredTables = [
         "devices",
         "sensor_readings",
         "events",
         "alerts",
         "weather",
-        "predictions"
+        "predictions",
+        "vision_events"
     ];
 
     try {
@@ -238,7 +226,7 @@ async function queryDatabase(
     query,
     params = []
 ) {
-
+    if (!sql) return null;
     try {
 
         const result = await sql.query(
@@ -265,7 +253,14 @@ async function queryDatabase(
 // ============================================================
 
 async function databaseHealthCheck() {
-
+    if (!sql) {
+        return {
+            success: true,
+            status: "local_storage",
+            database: "local_json_fallback",
+            timestamp: new Date().toISOString()
+        };
+    }
     try {
 
         const result = await sql`

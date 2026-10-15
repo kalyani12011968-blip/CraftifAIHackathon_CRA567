@@ -1,36 +1,8 @@
-<<<<<<< HEAD
-const {
-    getEvents
-} = require("../services/eventService");
-
-function listEvents(req, res) {
-
-    res.json({
-        success: true,
-        data: getEvents()
-    });
-}
-
-module.exports = {
-    listEvents
-};
-=======
-const { db } = require("../config/firebase");
-const { createEventRecord } = require("../services/eventService");
-
-const localEvents = [];
+const eventService = require("../services/eventService");
 
 const createEvent = async (req, res, next) => {
   try {
-    const event = createEventRecord(req.body);
-
-    if (db) {
-      const ref = await db.collection("events").add(event);
-      event.id = ref.id;
-    } else {
-      localEvents.push(event);
-    }
-
+    const event = await eventService.createEvent(req.body);
     res.status(201).json({
       success: true,
       data: event
@@ -42,44 +14,15 @@ const createEvent = async (req, res, next) => {
 
 const getEvents = async (req, res, next) => {
   try {
-    if (db) {
-      let query = db
-        .collection("events")
-        .orderBy("timestamp", "desc")
-        .limit(500);
-
-      if (req.query.deviceId) {
-        query = db
-          .collection("events")
-          .where("deviceId", "==", req.query.deviceId)
-          .orderBy("timestamp", "desc")
-          .limit(500);
-      }
-
-      const snap = await query.get();
-
-      return res.json({
-        success: true,
-        count: snap.size,
-        data: snap.docs.map((doc) => ({
-          id: doc.id,
-          ...doc.data()
-        }))
-      });
-    }
-
-    const data = [...localEvents]
-      .filter(
-        (event) =>
-          !req.query.deviceId ||
-          event.deviceId === req.query.deviceId
-      )
-      .reverse();
+    const data = await eventService.getEvents();
+    const filtered = req.query.deviceId
+      ? data.filter(e => e.deviceId === req.query.deviceId)
+      : data;
 
     res.json({
       success: true,
-      count: data.length,
-      data
+      count: filtered.length,
+      data: filtered
     });
   } catch (error) {
     next(error);
@@ -88,31 +31,9 @@ const getEvents = async (req, res, next) => {
 
 const getEvent = async (req, res, next) => {
   try {
-    if (db) {
-      const doc = await db
-        .collection("events")
-        .doc(req.params.id)
-        .get();
-
-      if (!doc.exists) {
-        return res.status(404).json({
-          success: false,
-          message: "Event not found"
-        });
-      }
-
-      return res.json({
-        success: true,
-        data: {
-          id: doc.id,
-          ...doc.data()
-        }
-      });
-    }
-
-    const event = localEvents.find(
-      (item) => item.id === req.params.id
-    );
+    const id = req.params.id || req.params.eventId;
+    const events = await eventService.getEvents();
+    const event = events.find(e => e.id === id || e.eventId === id);
 
     if (!event) {
       return res.status(404).json({
@@ -133,6 +54,6 @@ const getEvent = async (req, res, next) => {
 module.exports = {
   createEvent,
   getEvents,
-  getEvent
+  getEvent,
+  listEvents: getEvents
 };
->>>>>>> e236aa37c353724fa19dffdf3f7b9b17cecac8f5

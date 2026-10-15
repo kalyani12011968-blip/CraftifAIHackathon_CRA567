@@ -1,10 +1,13 @@
 import { io } from "socket.io-client";
-import { GATEWAY_URL } from "./api";
+import { API_BASE_URL } from "./api";
 
 let socket;
 
 export function getSocket() {
-  if (!socket) socket = io(GATEWAY_URL, { autoConnect: false, transports: ["websocket", "polling"] });
+  if (!socket) {
+    const socketUrl = API_BASE_URL.replace(/\/api$/, "");
+    socket = io(socketUrl, { autoConnect: false, transports: ["websocket", "polling"] });
+  }
   return socket;
 }
 

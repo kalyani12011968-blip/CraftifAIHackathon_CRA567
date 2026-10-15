@@ -1,0 +1,29 @@
+{
+  "apiEndpoint": "http://localhost:5001/api/vision/events",
+  "heartbeatEndpoint": "http://localhost:5001/api/vision/heartbeat",
+  "statusEndpoint": "http://localhost:5001/api/vision/status",
+  "cameraId": "CAM-001",
+  "locationId": "SITE-001",
+  "locationName": "Adyar Bridge Observation Post",
+  "confidenceThreshold": 0.50,
+  "dedupeCooldownSeconds": 30,
+  "targetClasses": [
+    "standing_water",
+    "road_waterlogging",
+    "water_accumulation"
+  ],
+  "model": {
+    "name": "yolov8n_water_hazard",
+    "format": "ONNX",
+    "inputResolution": [640, 640],
+    "precision": "FP16",
+    "tensorrtEngine": "yolov8n_water_hazard_fp16.engine"
+  },
+  "pipeline": {
+    "framework": "PipeGen",
+    "targetVersion": "v0.5.1",
+    "backendExecution": "TensorRT / DeepStream",
+    "inputSourceType": "file",
+    "defaultSampleVideo": "samples/road_waterlogging_sample.mp4"
+  }
+}

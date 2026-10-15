@@ -1,0 +1,83 @@
+{
+  "pipelineVersion": "0.5.1",
+  "pipelineId": "jal_rakshak_edge_water_hazard_v1",
+  "name": "JAL-RAKSHAK Edge Vision Pipeline",
+  "targetPlatform": {
+    "os": "Linux (Ubuntu 24.04 on WSL2)",
+    "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+    "computeCapability": "8.9",
+    "cudaVersion": "12.8+",
+    "tensorRtVersion": "10.x",
+    "deepStreamVersion": "7.x / 9.x"
+  },
+  "nodes": [
+    {
+      "id": "source_node",
+      "type": "VideoSource",
+      "properties": {
+        "sourceType": "file_or_stream",
+        "supportedFormats": ["mp4", "mkv", "rtsp", "v4l2"],
+        "defaultPath": "samples/road_waterlogging_sample.mp4",
+        "outputFormat": "NV12 / RGBA",
+        "frameRate": 30
+      }
+    },
+    {
+      "id": "preprocess_node",
+      "type": "Preprocess",
+      "properties": {
+        "targetResolution": [640, 640],
+        "maintainAspectRatio": true,
+        "paddingColor": [114, 114, 114],
+        "normalization": {
+          "scale": 0.00392156862745098,
+          "mean": [0.0, 0.0, 0.0]
+        },
+        "colorFormat": "RGB"
+      }
+    },
+    {
+      "id": "inference_node",
+      "type": "TensorRTInference",
+      "properties": {
+        "modelName": "yolov8n_water_hazard",
+        "onnxSource": "model/yolov8n_water_hazard.onnx",
+        "engineTarget": "model/yolov8n_water_hazard_fp16.engine",
+        "precision": "FP16",
+        "maxBatchSize": 1,
+        "workspaceSizeMb": 2048,
+        "inputBinding": "images",
+        "outputBinding": "output0"
+      }
+    },
+    {
+      "id": "postprocess_node",
+      "type": "NMSPostprocess",
+      "properties": {
+        "confidenceThreshold": 0.50,
+        "iouThreshold": 0.45,
+        "targetClasses": [
+          {"id": 0, "name": "standing_water"},
+          {"id": 1, "name": "road_waterlogging"}
+        ],
+        "maxDetections": 100
+      }
+    },
+    {
+      "id": "sink_node",
+      "type": "EventSink",
+      "properties": {
+        "transport": "HTTP / Socket.IO",
+        "backendUrl": "http://localhost:5001/api/vision/events",
+        "heartbeatUrl": "http://localhost:5001/api/vision/heartbeat",
+        "cooldownSeconds": 30
+      }
+    }
+  ],
+  "edges": [
+    {"from": "source_node", "to": "preprocess_node"},
+    {"from": "preprocess_node", "to": "inference_node"},
+    {"from": "inference_node", "to": "postprocess_node"},
+    {"from": "postprocess_node", "to": "sink_node"}
+  ]
+}

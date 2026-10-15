@@ -1,19 +1,73 @@
-<<<<<<< HEAD
-ai-ml/.venv/
-.venv/
-node_modules/
-.env
-=======
-node_modules/
-.env
-*.log
-coverage/
+# ========================
+# JAL-RAKSHAK EDGE .gitignore
+# ========================
 
-.env
-venv/
->>>>>>> e236aa37c353724fa19dffdf3f7b9b17cecac8f5
-ai-ml/datasets/jal_rakshak_synthetic_1M.csv
-ai-ml/datasets/jal_rakshak_synthetic_1M.csv
-ai-ml/.venv/
+# --- Node ---
 node_modules/
+npm-debug.log*
+yarn-error.log*
+*.tgz
+
+# --- Environment & Secrets ---
 .env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.crt
+*.secret
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+env/
+*.whl
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Build & Output ---
+coverage/
+*.log
+JAL-RAKSHAK-frontend/dist/
+
+# --- Vision Edge / ML Artifacts ---
+# Keep model weights in repo (< 100MB each), but exclude:
+vision-edge/model/*.onnx
+vision-edge/model/*.engine
+vision-edge/model/*.trt
+vision-edge/model/export/
+vision-edge/runs/
+vision-edge/datasets/
+*.mp4
+*.avi
+*.mkv
+
+# --- PipeGen / TensorRT Generated ---
+vision-edge/pipegen/*.engine
+vision-edge/pipegen/output/
+*.plan
+
+# --- Docker / Containers ---
+docker-compose.override.yml
+
+# --- Misc ---
+*.bak
+*.tmp
+*.cache
+.pytest_cache/

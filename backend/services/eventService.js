@@ -1,57 +1,6 @@
-<<<<<<< HEAD
-const {
-    addToCollection,
-    readCollection
-} = require("./storageService");
+const { addToCollection, readCollection } = require("./storageService");
+const { db } = require("../config/firebase");
 
-function createEvent(data) {
-
-    const event = {
-
-        eventId:
-            `EVT-${Date.now()}`,
-
-        deviceId:
-            data.deviceId,
-
-        type:
-            data.event ||
-            "NORMAL",
-
-        riskScore:
-            data.riskScore || 0,
-
-        timestamp:
-            new Date().toISOString(),
-
-        description:
-            data.description ||
-            "Water behavior event detected.",
-
-        status:
-            "ACTIVE"
-    };
-
-    addToCollection(
-        "events",
-        event
-    );
-
-    return event;
-}
-
-function getEvents() {
-
-    return readCollection(
-        "events"
-    );
-}
-
-module.exports = {
-    createEvent,
-    getEvents
-};
-=======
 const classifyEvent = ({
   waterTrend,
   riseRate,
@@ -91,12 +40,56 @@ const classifyEvent = ({
 
 const createEventRecord = (input) => ({
   id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  eventId: `EVT-${Date.now()}`,
   timestamp: new Date().toISOString(),
   ...input
 });
 
+const createEvent = async (data) => {
+  const event = createEventRecord({
+    deviceId: data.deviceId,
+    type: data.type || data.event || "NORMAL",
+    event: data.event || data.type || "NORMAL",
+    riskScore: data.riskScore !== undefined ? Number(data.riskScore) : 0,
+    confidence: data.confidence !== undefined ? Number(data.confidence) : 0.95,
+    description: data.description || `Event: ${data.event || data.type || "Observation"}`,
+    status: data.status || "ACTIVE",
+    latitude: data.latitude ?? null,
+    longitude: data.longitude ?? null
+  });
+
+  if (db) {
+    try {
+      const ref = await db.collection("events").add(event);
+      event.id = ref.id;
+    } catch (e) {
+      // fallback
+    }
+  }
+
+  addToCollection("events", event);
+  return event;
+};
+
+const getEvents = async () => {
+  if (db) {
+    try {
+      const snap = await db.collection("events").orderBy("timestamp", "desc").limit(500).get();
+      if (!snap.empty) {
+        return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      }
+    } catch (e) {
+      // fallback
+    }
+  }
+
+  const events = readCollection("events") || [];
+  return [...events].reverse();
+};
+
 module.exports = {
   classifyEvent,
-  createEventRecord
+  createEventRecord,
+  createEvent,
+  getEvents
 };
->>>>>>> e236aa37c353724fa19dffdf3f7b9b17cecac8f5

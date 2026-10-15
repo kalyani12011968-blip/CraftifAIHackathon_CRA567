@@ -1,10 +1,10 @@
 const {
     analyzeWaterRisk
-} = require("C:\\JAL-RAKSHAK\\JAL-RAKSHAK\\llm\\analysisService.js");
+} = require("../../llm/analysisService");
 
 const {
     askAssistant
-} = require("C:\\JAL-RAKSHAK\\JAL-RAKSHAK\\llm\\chatbotService.js");
+} = require("../../llm/chatbotService");
 
 async function analyze(data) {
 

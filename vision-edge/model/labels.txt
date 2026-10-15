@@ -1,0 +1,5 @@
+standing_water
+road_waterlogging
+dry_surface
+vehicle
+person

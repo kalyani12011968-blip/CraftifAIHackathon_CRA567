@@ -1,0 +1,37 @@
+{
+  "modelName": "yolov8n_water_hazard",
+  "task": "detection",
+  "classes": [
+    "standing_water",
+    "road_waterlogging",
+    "dry_surface",
+    "vehicle",
+    "person"
+  ],
+  "targetHazardClasses": [
+    "standing_water",
+    "road_waterlogging"
+  ],
+  "input": {
+    "tensor": "images",
+    "shape": [1, 3, 640, 640],
+    "dtype": "float32",
+    "colorOrder": "RGB",
+    "scale": 0.00392156862745098
+  },
+  "output": {
+    "tensor": "output0",
+    "shape": [1, 9, 8400],
+    "dtype": "float32",
+    "format": "cx, cy, w, h, class_scores"
+  },
+  "tensorrt": {
+    "engine": "yolov8n_water_hazard_fp16.engine",
+    "precision": "FP16",
+    "calibrator": null,
+    "minShapes": "images:1x3x640x640",
+    "optShapes": "images:1x3x640x640",
+    "maxShapes": "images:4x3x640x640"
+  },
+  "notes": "Pretrained on surface water & puddle hazard benchmark. Do not substitute generic vehicle/coco models for flood safety."
+}

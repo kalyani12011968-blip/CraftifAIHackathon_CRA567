@@ -1,18 +1,21 @@
 import { Link } from "react-router-dom";
 import { Activity, CloudRain, Cpu, Gauge, MapPin, Thermometer, Waves, Zap, ArrowUpRight, BellRing } from "lucide-react";
 import { useApp } from "../context/AppContext";
+import { useVision } from "../hooks/useVision";
 import PageHeader from "../components/common/PageHeader";
 import RiskGauge from "../components/common/RiskGauge";
 import KpiCard from "../components/common/KpiCard";
 import MetricChart from "../components/common/MetricChart";
 import StatusBadge from "../components/common/StatusBadge";
 import SimulationControl from "../components/common/SimulationControl";
+import CorrelatedRiskPanel from "../components/vision/CorrelatedRiskPanel";
 import { eventLabel } from "../utils/risk";
 import { formatTime } from "../utils/formatters";
 import OpsMap from "../components/map/OpsMap";
 
 export default function Dashboard() {
   const { reading, prediction, history, events, alerts, devices, demoMode } = useApp();
+  const vision = useVision();
   const active = events.find(e => e.status === "ACTIVE") || events[0];
   return <div>
     <PageHeader title="Water-Risk Command Center" description="The judge should understand the operational situation in seconds." actions={<><span className="btn"><Activity size={15}/> {demoMode ? "DEMO MODE" : "LIVE"}</span><span className="btn"><span className="h-2 w-2 rounded-full bg-emerald-400"/> System Online</span></>} />
@@ -39,6 +42,9 @@ export default function Dashboard() {
     <div className="mt-5 grid gap-5 xl:grid-cols-[1.1fr_.9fr]">
       <section className="panel overflow-hidden"><div className="flex items-center justify-between border-b border-slate-800 p-5"><div><div className="eyebrow">Live Map</div><div className="mt-1 font-semibold text-white">Operational monitoring points</div></div><Link className="text-xs text-cyan-300" to="/map">Open full map →</Link></div><OpsMap devices={devices} height={340}/></section>
       <section className="panel p-5"><div className="flex items-center justify-between"><div><div className="eyebrow">Response Action</div><div className="mt-1 font-semibold text-white">Incident handling status</div></div><BellRing size={17} className="text-cyan-300"/></div><div className="mt-5 space-y-3"><Action text="GSM Alert Sent"/><Action text="Local Alarm Activated"/><Action text="GPS Location Recorded"/><Action text="Event Stored"/></div><div className="mt-5 border-t border-slate-800 pt-4 text-xs text-slate-500">Device <span className="text-slate-300">{reading.deviceId}</span> · Last update <span className="text-slate-300">10 sec ago</span></div></section>
+    </div>
+    <div className="mt-5">
+      <CorrelatedRiskPanel vision={vision} sensorReading={reading} prediction={prediction}/>
     </div>
 
     <div className="mt-5"><SimulationControl/></div>

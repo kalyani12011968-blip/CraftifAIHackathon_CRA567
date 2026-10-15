@@ -1,114 +1,3 @@
-<<<<<<< HEAD
-const users = [];
-
-function register(req, res) {
-
-    const {
-        name,
-        email,
-        password
-    } = req.body;
-
-    if (!name || !email || !password) {
-
-        return res.status(400).json({
-            success: false,
-            message:
-                "Name, email and password are required"
-        });
-    }
-
-    const existing =
-        users.find(
-            user =>
-                user.email === email
-        );
-
-    if (existing) {
-
-        return res.status(409).json({
-            success: false,
-            message:
-                "User already exists"
-        });
-    }
-
-    const user = {
-
-        userId:
-            `USR-${Date.now()}`,
-
-        name,
-
-        email,
-
-        role:
-            "VIEWER"
-    };
-
-    users.push({
-        ...user,
-        password
-    });
-
-    res.status(201).json({
-        success: true,
-        data: user
-    });
-}
-
-function login(req, res) {
-
-    const {
-        email,
-        password
-    } = req.body;
-
-    const user =
-        users.find(
-            item =>
-                item.email === email &&
-                item.password === password
-        );
-
-    if (!user) {
-
-        return res.status(401).json({
-            success: false,
-            message:
-                "Invalid email or password"
-        });
-    }
-
-    res.json({
-        success: true,
-        message: "Login successful",
-        token:
-            `demo-token-${user.userId}`,
-        user: {
-            userId: user.userId,
-            name: user.name,
-            email: user.email,
-            role: user.role
-        }
-    });
-}
-
-function me(req, res) {
-
-    res.json({
-        success: true,
-        message:
-            "Development authentication active"
-    });
-}
-
-module.exports = {
-    register,
-    login,
-    me
-};
-=======
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 
@@ -121,12 +10,17 @@ const hashPassword = (password) => {
     .digest("hex");
 };
 
+// Seed default demo user
+users.set("admin@jalrakshak.demo", {
+  userId: "USR-DEMO-01",
+  email: "admin@jalrakshak.demo",
+  name: "Admin User",
+  role: "ADMIN",
+  passwordHash: hashPassword("demo1234")
+});
+
 const register = (req, res) => {
-  const {
-    email,
-    password,
-    name
-  } = req.body;
+  const { email, password, name } = req.body;
 
   if (!email || !password) {
     return res.status(400).json({
@@ -142,40 +36,47 @@ const register = (req, res) => {
     });
   }
 
-  users.set(email, {
+  const userId = `USR-${Date.now()}`;
+  const newUser = {
+    userId,
     email,
-    name: name || email,
+    name: name || email.split("@")[0],
+    role: "VIEWER",
     passwordHash: hashPassword(password)
-  });
+  };
+
+  users.set(email, newUser);
 
   res.status(201).json({
     success: true,
-    message: "User registered"
+    message: "User registered successfully",
+    data: {
+      userId: newUser.userId,
+      email: newUser.email,
+      name: newUser.name,
+      role: newUser.role
+    }
   });
 };
 
 const login = (req, res) => {
-  const {
-    email,
-    password
-  } = req.body;
+  const { email, password } = req.body;
 
   const user = users.get(email);
 
-  if (
-    !user ||
-    user.passwordHash !== hashPassword(password)
-  ) {
+  if (!user || user.passwordHash !== hashPassword(password)) {
     return res.status(401).json({
       success: false,
-      message: "Invalid credentials"
+      message: "Invalid email or password"
     });
   }
 
   const token = jwt.sign(
     {
+      userId: user.userId,
       email: user.email,
-      name: user.name
+      name: user.name,
+      role: user.role
     },
     process.env.JWT_SECRET || "development-secret",
     {
@@ -185,16 +86,27 @@ const login = (req, res) => {
 
   res.json({
     success: true,
+    message: "Login successful",
     token,
     user: {
+      userId: user.userId,
       email: user.email,
-      name: user.name
+      name: user.name,
+      role: user.role
     }
+  });
+};
+
+const me = (req, res) => {
+  res.json({
+    success: true,
+    message: "Authentication service active",
+    user: req.user || null
   });
 };
 
 module.exports = {
   register,
-  login
+  login,
+  me
 };
->>>>>>> e236aa37c353724fa19dffdf3f7b9b17cecac8f5

@@ -1,59 +1,3 @@
-<<<<<<< HEAD
-function calculateRiseRate(
-    currentLevel,
-    previousLevel,
-    deltaMinutes
-) {
-
-    if (!deltaMinutes || deltaMinutes <= 0) {
-        return 0;
-    }
-
-    return (
-        (currentLevel - previousLevel) /
-        deltaMinutes
-    );
-}
-
-function calculateAcceleration(
-    currentRate,
-    previousRate,
-    deltaMinutes
-) {
-
-    if (!deltaMinutes || deltaMinutes <= 0) {
-        return 0;
-    }
-
-    return (
-        (currentRate - previousRate) /
-        deltaMinutes
-    );
-}
-
-function getRiskBand(score) {
-
-    if (score >= 76) {
-        return "CRITICAL";
-    }
-
-    if (score >= 51) {
-        return "WARNING";
-    }
-
-    if (score >= 26) {
-        return "WATCH";
-    }
-
-    return "SAFE";
-}
-
-module.exports = {
-    calculateRiseRate,
-    calculateAcceleration,
-    getRiskBand
-};
-=======
 const calculateRiseRate = (currentLevel, previousLevel, timeMinutes) => {
   if (
     previousLevel === null ||
@@ -100,11 +44,18 @@ const clamp = (value, min, max) => {
   return Math.max(min, Math.min(max, value));
 };
 
+function getRiskBand(score) {
+  if (score >= 76) return "CRITICAL";
+  if (score >= 51) return "WARNING";
+  if (score >= 26) return "WATCH";
+  return "SAFE";
+}
+
 module.exports = {
   calculateRiseRate,
   calculateAcceleration,
   determineTrend,
   calculateDeviation,
-  clamp
+  clamp,
+  getRiskBand
 };
->>>>>>> e236aa37c353724fa19dffdf3f7b9b17cecac8f5

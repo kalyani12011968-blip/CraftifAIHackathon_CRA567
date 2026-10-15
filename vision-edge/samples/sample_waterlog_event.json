@@ -1,0 +1,13 @@
+{
+  "source": "vision",
+  "eventType": "WATER_HAZARD_OBSERVATION",
+  "className": "standing_water",
+  "confidence": 0.91,
+  "cameraId": "CAM-001",
+  "locationId": "SITE-001",
+  "timestamp": "2026-10-15T14:00:00Z",
+  "bbox": [154.2, 210.5, 320.0, 195.4],
+  "evidenceUrl": "https://jalrakshak.local/evidence/adyar_bridge_waterlog.jpg",
+  "trackId": "TRK-001",
+  "isTestEvent": false
+}

@@ -1,123 +1,13 @@
-<<<<<<< HEAD
-const {
-    processSensorData,
-    getSensorHistory
-} = require("../services/sensorService");
-
-async function receiveSensorData(req, res, next) {
-
-    try {
-
-        const result =
-            await processSensorData(
-                req.body
-            );
-
-        res.status(201).json({
-            success: true,
-            message:
-                "Sensor data processed",
-            data: result
-        });
-
-    } catch (error) {
-
-        next(error);
-    }
-}
-
-function latestSensor(req, res) {
-
-    const data =
-        getSensorHistory();
-
-    res.json({
-        success: true,
-        data:
-            data[data.length - 1] ||
-            null
-    });
-}
-
-function sensorHistory(req, res) {
-
-    res.json({
-        success: true,
-        data:
-            getSensorHistory()
-    });
-}
-
-module.exports = {
-    receiveSensorData,
-    latestSensor,
-    sensorHistory
-};
-=======
 const sensorService = require("../services/sensorService");
-const waterBehaviorService = require("../services/waterBehaviorService");
-const riskService = require("../services/riskService");
-const eventService = require("../services/eventService");
-const deviceService = require("../services/deviceService");
 
 const receiveSensorData = async (req, res, next) => {
   try {
-    const reading = await sensorService.saveSensorReading(req.body);
-
-    const history = await sensorService.getHistory(
-      req.body.deviceId
-    );
-
-    const previous = history.length > 1
-      ? history[1]
-      : null;
-
-    const baselineHistory = history
-      .slice(2, 102)
-      .filter((item) => Number.isFinite(item.waterLevel));
-
-    const historical =
-      waterBehaviorService.calculateHistoricalBaseline(
-        baselineHistory
-      );
-
-    const behavior =
-      waterBehaviorService.analyzeWaterBehavior(
-        reading,
-        previous,
-        historical
-      );
-
-    const sensorQuality =
-      req.body.sensorQuality ?? 1;
-
-    const event =
-      eventService.classifyEvent({
-        ...behavior,
-        sensorQuality
-      });
-
-    const risk =
-      riskService.calculateRisk({
-        ...behavior,
-        sensorQuality
-      });
-
-    await deviceService.updateLastSeen(
-      reading.deviceId
-    );
+    const result = await sensorService.processSensorData(req.body);
 
     res.status(201).json({
       success: true,
-      data: {
-        reading,
-        behavior: {
-          ...behavior,
-          sensorQuality
-        },
-        event,
-        risk
-      }
+      message: "Sensor data processed",
+      data: result
     });
   } catch (error) {
     next(error);
@@ -126,9 +16,7 @@ const receiveSensorData = async (req, res, next) => {
 
 const getLatestSensorData = async (req, res, next) => {
   try {
-    const data = await sensorService.getLatest(
-      req.query.deviceId
-    );
+    const data = await sensorService.getLatest(req.query.deviceId);
 
     res.json({
       success: true,
@@ -141,9 +29,7 @@ const getLatestSensorData = async (req, res, next) => {
 
 const getSensorHistory = async (req, res, next) => {
   try {
-    const data = await sensorService.getHistory(
-      req.query.deviceId
-    );
+    const data = await sensorService.getHistory(req.query.deviceId);
 
     res.json({
       success: true,
@@ -158,6 +44,7 @@ const getSensorHistory = async (req, res, next) => {
 module.exports = {
   receiveSensorData,
   getLatestSensorData,
-  getSensorHistory
+  getSensorHistory,
+  latestSensor: getLatestSensorData,
+  sensorHistory: getSensorHistory
 };
->>>>>>> e236aa37c353724fa19dffdf3f7b9b17cecac8f5

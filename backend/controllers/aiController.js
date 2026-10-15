@@ -1,11 +1,11 @@
 const {
     predict
-} = require("C:\\JAL-RAKSHAK\\JAL-RAKSHAK\\backend\\services\\aiService.js");
+} = require("../services/aiService");
 
 const {
     analyze: analyzeLLM,
     chat: chatLLM
-} = require("C:\\JAL-RAKSHAK\\JAL-RAKSHAK\\backend\\services\\llmService.js");
+} = require("../services/llmService");
 
 
 // ======================================
